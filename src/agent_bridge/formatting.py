@@ -8,7 +8,7 @@ into ``read_message``, ``reply``, or ``mark_read``.
 
 from __future__ import annotations
 
-from .models import BridgeStatus, Message, ThreadSummary
+from .models import AgentStatus, BridgeStatus, Message, ThreadSummary, WaitOutcome
 from .store import preview
 
 
@@ -144,9 +144,68 @@ def format_status(status: BridgeStatus) -> str:
         f"  messages:       {status.total_messages} in {status.total_threads} threads",
         f"  known agents:   {', '.join(status.known_agents)}",
         "",
-        "  agent      unread  last connected",
+        "  agent      status           unread  last connected",
     ]
     for agent in status.agents:
         seen = short_time(agent.last_seen_at) if agent.last_seen_at else "never"
-        lines.append(f"  {agent.id:<10} {agent.unread:>6}  {seen}")
+        lines.append(f"  {agent.id:<10} {agent.status:<16} {agent.unread:>6}  {seen}")
+    lines.append("")
+    lines.append("  Status is what each agent reported, not what the bridge guessed.")
+    return "\n".join(lines)
+
+
+def format_agent_status(status: AgentStatus) -> str:
+    """Detailed availability record for one agent."""
+    lines = [
+        f"{status.id}: {status.status}",
+        f"  reported by:   {status.status_source}",
+        f"  changed at:    "
+        + (short_time(status.status_changed_at) if status.status_changed_at else "never"),
+        f"  last connected: "
+        + (short_time(status.last_seen_at) if status.last_seen_at else "never"),
+        f"  unread:        {status.unread}",
+    ]
+    if status.resume_after:
+        lines.append(f"  resume after:  {short_time(status.resume_after)}")
+    if status.status_reason:
+        lines.append(f"  reason:        {status.status_reason}")
+
+    idle = status.seconds_since_seen()
+    if idle is not None and idle > 900:
+        # Observed, and labelled as observed. Silence is never converted into
+        # a reported status such as usage_exhausted.
+        lines.append(
+            f"  note:          not seen for {idle / 60:.0f} minutes "
+            "(observation only; status is unchanged)"
+        )
+    return "\n".join(lines)
+
+
+def format_wait_outcome(agent: str, outcome: WaitOutcome) -> str:
+    """Render a wait result so the agent knows what to do next."""
+    header = f"Wait ended after {outcome.waited_seconds:.1f}s: {outcome.reason}"
+
+    if outcome.reason == "message_received":
+        return header + "\n\n" + format_inbox(agent, list(outcome.messages), unread_only=True)
+
+    lines = [header]
+    if outcome.detail:
+        lines.extend(["", outcome.detail])
+    if outcome.peer is not None:
+        lines.extend(["", format_agent_status(outcome.peer)])
+    if outcome.reason == "timeout":
+        lines.append("")
+        lines.append(
+            "Nothing arrived. Wait again if you are still expecting something, "
+            "or tell the user what you are blocked on."
+        )
+    elif outcome.reason == "peer_unavailable":
+        lines.append("")
+        lines.append(
+            "Do not keep waiting on this peer. Tell the user what happened and, "
+            "if a resume time was given, when it is worth retrying."
+        )
+    elif outcome.reason == "bridge_shutdown":
+        lines.append("")
+        lines.append("The bridge server is stopping. Nothing was lost; messages persist.")
     return "\n".join(lines)

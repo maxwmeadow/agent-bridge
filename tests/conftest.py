@@ -5,7 +5,7 @@ from typing import Iterator
 
 import pytest
 
-from agent_bridge.config import AGENT_ENV, AGENTS_ENV, HOME_ENV
+from agent_bridge.config import AGENT_ENV, AGENTS_ENV, HOME_ENV, POLL_INTERVAL_ENV
 from agent_bridge.store import MessageStore
 
 
@@ -17,6 +17,8 @@ def bridge_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
     monkeypatch.setenv(HOME_ENV, str(home))
     monkeypatch.delenv(AGENT_ENV, raising=False)
     monkeypatch.delenv(AGENTS_ENV, raising=False)
+    # Poll fast so wait tests stay quick. The production default is 200ms.
+    monkeypatch.setenv(POLL_INTERVAL_ENV, "0.01")
     yield home
 
 

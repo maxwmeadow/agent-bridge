@@ -27,6 +27,77 @@ _AGENT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 MAX_SUBJECT_CHARS = 200
 MAX_BODY_CHARS = 100_000
 MAX_CONTEXT_VALUE_CHARS = 500
+MAX_REASON_CHARS = 500
+
+#: Availability states an agent can report for itself.
+#:
+#: These are *reported*, never inferred. In particular the bridge never decides
+#: an agent is ``usage_exhausted`` because it has been quiet: only an explicit
+#: report from the agent, its client, or the operator sets that.
+AGENT_STATUSES: tuple[str, ...] = (
+    "available",  # ready for work
+    "busy",  # working on something, still alive
+    "waiting",  # blocked in wait_for_event
+    "usage_exhausted",  # subscription limit hit; see resume_after
+    "auth_error",  # login expired or rejected
+    "client_closed",  # the editor/panel went away cleanly
+    "unresponsive",  # someone observed it failing to answer
+    "unknown",  # never reported anything
+)
+
+#: Statuses that mean "do not expect progress from this agent right now".
+UNAVAILABLE_STATUSES: frozenset[str] = frozenset(
+    {"usage_exhausted", "auth_error", "client_closed", "unresponsive"}
+)
+
+# --- wait_for_event bounds -------------------------------------------------
+#: Server-side clamp. A caller cannot ask to block forever.
+MAX_WAIT_SECONDS = 600
+MIN_WAIT_SECONDS = 1
+DEFAULT_WAIT_SECONDS = 60
+#: Claude Code moves a main-conversation MCP call to a background task once it
+#: passes this mark (v2.1.212+). Waits at or under it stay in the same turn.
+SAME_TURN_WAIT_SECONDS = 120
+
+#: How often a waiter re-reads SQLite. This is what makes cross-process
+#: wake-ups work at all: an in-process event cannot reach the other agent's
+#: server, which is a separate OS process.
+POLL_INTERVAL_ENV = "AGENT_BRIDGE_POLL_INTERVAL"
+DEFAULT_POLL_INTERVAL = 0.2
+#: How often a blocked call emits an MCP progress notification, so clients can
+#: see it is alive and their idle timers stay reset.
+HEARTBEAT_SECONDS = 15.0
+
+
+def poll_interval() -> float:
+    """Seconds between persistent-state re-checks while waiting."""
+    raw = os.environ.get(POLL_INTERVAL_ENV)
+    if not raw:
+        return DEFAULT_POLL_INTERVAL
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValidationError(f"{POLL_INTERVAL_ENV} must be a number, got {raw!r}.") from exc
+    if not 0.001 <= value <= 5.0:
+        raise ValidationError(f"{POLL_INTERVAL_ENV} must be between 0.001 and 5 seconds.")
+    return value
+
+
+def require_valid_status(status: str) -> str:
+    """Normalize and check an availability status."""
+    normalized = status.strip().lower()
+    if normalized not in AGENT_STATUSES:
+        raise ValidationError(
+            f"Unknown status {status!r}. Valid statuses: {', '.join(AGENT_STATUSES)}."
+        )
+    return normalized
+
+
+def clamp_wait_seconds(seconds: float) -> float:
+    """Clamp a requested wait to the server-side bounds."""
+    if seconds != seconds or seconds in (float("inf"), float("-inf")):  # NaN / inf
+        raise ValidationError("timeout_seconds must be a finite number.")
+    return float(min(max(seconds, MIN_WAIT_SECONDS), MAX_WAIT_SECONDS))
 
 
 def data_dir() -> Path:

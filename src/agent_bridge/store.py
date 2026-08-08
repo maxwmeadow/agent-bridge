@@ -9,15 +9,18 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__, db, ids
 from .config import (
     MAX_BODY_CHARS,
     MAX_CONTEXT_VALUE_CHARS,
+    MAX_REASON_CHARS,
     MAX_SUBJECT_CHARS,
     known_agents,
     require_known_agent,
+    require_valid_status,
 )
 from .errors import NotFoundError, PermissionDeniedError, ValidationError
 from .models import AgentStatus, BridgeStatus, Message, ThreadSummary, utc_now
@@ -82,7 +85,12 @@ class MessageStore:
     # ---------------------------------------------------------------- agents
 
     def record_agent_seen(self, agent: str) -> None:
-        """Note that an agent connected. Used by ``bridge_status`` diagnostics."""
+        """Note that an agent connected. Observed by the bridge, not reported.
+
+        This deliberately does not touch ``status``. Liveness and availability
+        are different questions, and conflating them is how you end up
+        guessing that a quiet agent is out of quota.
+        """
         agent = require_known_agent(agent)
         now = utc_now()
         with db.session(self.db_path) as conn, conn:
@@ -94,6 +102,92 @@ class MessageStore:
                 """,
                 (agent, now, now),
             )
+
+    def set_status(
+        self,
+        agent: str,
+        status: str,
+        *,
+        reason: str | None = None,
+        resume_after: str | None = None,
+        source: str = "self",
+    ) -> AgentStatus:
+        """Record an agent's reported availability.
+
+        Any status may follow any other. No transition graph is enforced: a
+        client can die in any state, and refusing a "wrong" transition would
+        only leave a stale record that is more misleading than the new one.
+        The *values* are validated; the ordering is not.
+        """
+        agent = require_known_agent(agent)
+        status = require_valid_status(status)
+        if reason is not None:
+            reason = _clean_text(
+                reason, field="reason", limit=MAX_REASON_CHARS, allow_empty=True
+            ) or None
+        resume_after = _clean_resume_after(resume_after)
+        if source not in ("self", "cli", "peer"):
+            raise ValidationError(f"Unknown status source {source!r}.")
+
+        now = utc_now()
+        with db.session(self.db_path) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO agents (
+                    id, first_seen_at, last_seen_at,
+                    status, status_changed_at, status_reason, resume_after, status_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    status            = excluded.status,
+                    status_changed_at = excluded.status_changed_at,
+                    status_reason     = excluded.status_reason,
+                    resume_after      = excluded.resume_after,
+                    status_source     = excluded.status_source,
+                    last_seen_at      = excluded.last_seen_at
+                """,
+                (agent, now, now, status, now, reason, resume_after, source),
+            )
+        log.info(
+            "status set agent=%s status=%s source=%s resume_after=%s",
+            agent,
+            status,
+            source,
+            resume_after or "-",
+        )
+        return self.get_status(agent)
+
+    def get_status(self, agent: str) -> AgentStatus:
+        """Current availability record for one agent."""
+        agent = require_known_agent(agent)
+        with db.session(self.db_path) as conn:
+            return _read_status(conn, agent)
+
+    def all_statuses(self) -> tuple[AgentStatus, ...]:
+        with db.session(self.db_path) as conn:
+            return tuple(_read_status(conn, name) for name in known_agents())
+
+    def cancel_waits(self, agent: str, *, reason: str | None = None) -> int:
+        """Wake this agent's blocked waiters with ``cancelled``.
+
+        Returns the new cancellation sequence number. Waiters compare against
+        the value they captured before blocking, so a cancel issued during
+        registration is still seen.
+        """
+        agent = require_known_agent(agent)
+        with db.session(self.db_path) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO agents (id, first_seen_at, last_seen_at, wait_cancel_seq)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(id) DO UPDATE SET wait_cancel_seq = wait_cancel_seq + 1
+                """,
+                (agent, utc_now(), utc_now()),
+            )
+            row = conn.execute(
+                "SELECT wait_cancel_seq FROM agents WHERE id = ?", (agent,)
+            ).fetchone()
+        log.info("waits cancelled agent=%s seq=%d reason=%s", agent, int(row[0]), reason or "-")
+        return int(row[0])
 
     # --------------------------------------------------------------- sending
 
@@ -372,14 +466,7 @@ class MessageStore:
             schema_version = db.current_schema_version(conn)
             total_messages = int(conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
             total_threads = int(conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0])
-            seen = {
-                row["id"]: row["last_seen_at"]
-                for row in conn.execute("SELECT id, last_seen_at FROM agents").fetchall()
-            }
-            agents = tuple(
-                AgentStatus(id=name, unread=_count_unread(conn, name), last_seen_at=seen.get(name))
-                for name in roster
-            )
+            agents = tuple(_read_status(conn, name) for name in roster)
         return BridgeStatus(
             version=__version__,
             agent=agent,
@@ -390,6 +477,43 @@ class MessageStore:
             total_messages=total_messages,
             total_threads=total_threads,
         )
+
+
+def _clean_resume_after(value: str | None) -> str | None:
+    """Validate an optional ISO-8601 resume hint and normalize it to UTC."""
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValidationError(
+            f"resume_after must be an ISO-8601 timestamp, got {value!r}."
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _read_status(conn: sqlite3.Connection, agent: str) -> AgentStatus:
+    """Build an agent's availability record, defaulting cleanly when absent."""
+    row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent,)).fetchone()
+    unread = _count_unread(conn, agent)
+    if row is None:
+        return AgentStatus(id=agent, unread=unread, last_seen_at=None)
+    return AgentStatus(
+        id=agent,
+        unread=unread,
+        last_seen_at=row["last_seen_at"],
+        status=row["status"],
+        status_changed_at=row["status_changed_at"],
+        status_reason=row["status_reason"],
+        resume_after=row["resume_after"],
+        status_source=row["status_source"],
+        wait_cancel_seq=int(row["wait_cancel_seq"]),
+    )
 
 
 def _count_unread(conn: sqlite3.Connection, agent: str) -> int:

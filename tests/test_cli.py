@@ -76,3 +76,49 @@ def test_status_and_paths(capsys: pytest.CaptureFixture[str], db_path: Path) -> 
 
     code, out, _ = run(capsys, "agents")
     assert out.split() == ["claude", "codex"]
+
+
+def test_status_for_one_agent_and_set_status(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = run(capsys, "status", "codex")
+    assert code == 0
+    assert "codex: unknown" in out
+
+    code, out, _ = run(
+        capsys,
+        "set-status", "codex", "usage_exhausted",
+        "--reason", "5-hour limit",
+        "--resume-after", "2026-08-08T12:00:00Z",
+    )
+    assert code == 0
+    assert "codex: usage_exhausted" in out
+    assert "reported by:   cli" in out
+    assert "5-hour limit" in out
+
+    code, out, _ = run(capsys, "status")
+    assert "usage_exhausted" in out
+    assert "Status is what each agent reported" in out
+
+
+def test_set_status_rejects_unknown_value(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):  # argparse choices
+        run(capsys, "set-status", "codex", "on_fire")
+
+
+def test_wait_times_out_with_exit_code_three(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = run(capsys, "wait", "claude", "--timeout", "1")
+    assert code == 3
+    assert "timeout" in out
+
+
+def test_wait_returns_immediately_for_existing_mail(capsys: pytest.CaptureFixture[str]) -> None:
+    run(capsys, "send", "--from", "codex", "--to", "claude", "--subject", "hi", "--body", "b")
+    code, out, _ = run(capsys, "wait", "claude", "--timeout", "30")
+    assert code == 0
+    assert "message_received" in out
+    assert "hi" in out
+
+
+def test_cancel_wait(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = run(capsys, "cancel-wait", "claude", "--reason", "manual")
+    assert code == 0
+    assert "sequence 1" in out

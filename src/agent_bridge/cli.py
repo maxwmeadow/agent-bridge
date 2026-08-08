@@ -11,15 +11,29 @@ import argparse
 import sys
 from pathlib import Path
 
+import anyio
+
 from . import __version__
-from .config import DEFAULT_AGENTS, database_path, known_agents, log_path, require_known_agent
+from .config import (
+    AGENT_STATUSES,
+    DEFAULT_AGENTS,
+    DEFAULT_WAIT_SECONDS,
+    MAX_WAIT_SECONDS,
+    database_path,
+    known_agents,
+    log_path,
+    require_known_agent,
+)
 from .errors import BridgeError
+from .events import EventHub, wait_for_event
 from .formatting import (
+    format_agent_status,
     format_inbox,
     format_message,
     format_status,
     format_thread,
     format_threads,
+    format_wait_outcome,
 )
 from .store import MessageStore
 
@@ -35,8 +49,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    status = sub.add_parser("status", help="Show database location, agents, and unread counts.")
-    status.add_argument("--agent", default=DEFAULT_AGENTS[0], help="Point of view for the report.")
+    status = sub.add_parser("status", help="Show bridge state, or one agent's availability.")
+    status.add_argument(
+        "agent", nargs="?", default=None, help="Show just this agent's availability record."
+    )
+    status.add_argument(
+        "--agent", dest="viewpoint", default=DEFAULT_AGENTS[0], help="Point of view for the report."
+    )
+
+    set_status = sub.add_parser("set-status", help="Record an agent's availability.")
+    set_status.add_argument("agent")
+    set_status.add_argument("status", choices=AGENT_STATUSES)
+    set_status.add_argument("--reason", default=None, help="Human-readable explanation.")
+    set_status.add_argument(
+        "--resume-after", default=None, help="ISO-8601 time when it should be usable again."
+    )
+
+    wait = sub.add_parser("wait", help="Block until mail arrives or a peer changes state.")
+    wait.add_argument("agent", help="Whose inbox to wait on.")
+    wait.add_argument(
+        "--timeout", type=float, default=DEFAULT_WAIT_SECONDS,
+        help=f"Seconds to block (1-{MAX_WAIT_SECONDS}, clamped).",
+    )
+    wait.add_argument(
+        "--ignore-peer-status", action="store_true", help="Only wake for mail and cancellation."
+    )
+
+    cancel = sub.add_parser("cancel-wait", help="Wake an agent's blocked waiters.")
+    cancel.add_argument("agent")
+    cancel.add_argument("--reason", default=None)
 
     inbox = sub.add_parser("inbox", help="List messages addressed to an agent.")
     inbox.add_argument("agent", help="Agent whose inbox to list.")
@@ -103,8 +144,42 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "status":
-        print(format_status(store.status(args.agent)))
+        if args.agent:
+            print(format_agent_status(store.get_status(args.agent)))
+        else:
+            print(format_status(store.status(args.viewpoint)))
         return 0
+
+    if args.command == "set-status":
+        record = store.set_status(
+            args.agent,
+            args.status,
+            reason=args.reason,
+            resume_after=args.resume_after,
+            source="cli",
+        )
+        print(format_agent_status(record))
+        return 0
+
+    if args.command == "cancel-wait":
+        seq = store.cancel_waits(args.agent, reason=args.reason)
+        print(f"Cancelled {args.agent}'s waits (sequence {seq}).")
+        return 0
+
+    if args.command == "wait":
+        agent = require_known_agent(args.agent)
+        outcome = anyio.run(
+            lambda: wait_for_event(
+                store,
+                EventHub(),
+                agent=agent,
+                timeout_seconds=args.timeout,
+                wake_on_peer_status=not args.ignore_peer_status,
+            )
+        )
+        print(format_wait_outcome(agent, outcome))
+        # Distinguish "something happened" from "nothing did", for shell use.
+        return 0 if outcome.reason != "timeout" else 3
 
     if args.command == "inbox":
         agent = require_known_agent(args.agent)

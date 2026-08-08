@@ -27,6 +27,9 @@ EXPECTED_TOOLS = {
     "list_threads",
     "read_thread",
     "bridge_status",
+    "wait_for_mail",
+    "set_status",
+    "peer_status",
 }
 
 
@@ -145,3 +148,108 @@ def test_identity_comes_from_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     assert ServerConfig.resolve(None).agent == "codex"
     # An explicit flag wins over the environment.
     assert ServerConfig.resolve("claude").agent == "claude"
+
+
+def test_wait_for_mail_blocks_then_wakes_over_mcp(db_path: Path) -> None:
+    """A blocked MCP tool call resolves when the other agent's server sends."""
+
+    async def scenario() -> None:
+        claude = make_server("claude", db_path)
+        codex = make_server("codex", db_path)
+
+        async with Client(claude) as claude_client, Client(codex) as codex_client:
+            results: list[str] = []
+
+            async with anyio.create_task_group() as tg:
+
+                async def blocked_call() -> None:
+                    results.append(
+                        text_of(
+                            await claude_client.call_tool(
+                                "wait_for_mail", {"timeout_seconds": 20}
+                            )
+                        )
+                    )
+
+                async def sender() -> None:
+                    await anyio.sleep(0.2)
+                    await codex_client.call_tool(
+                        "send_message",
+                        {"to": "claude", "subject": "woke you", "body": "done implementing"},
+                    )
+
+                tg.start_soon(blocked_call)
+                tg.start_soon(sender)
+
+            assert "message_received" in results[0]
+            assert "woke you" in results[0]
+
+    anyio.run(scenario)
+
+
+def test_wait_for_mail_times_out_over_mcp(db_path: Path) -> None:
+    async def scenario() -> None:
+        async with Client(make_server("claude", db_path)) as client:
+            result = text_of(await client.call_tool("wait_for_mail", {"timeout_seconds": 1}))
+            assert "timeout" in result
+
+    anyio.run(scenario)
+
+
+def test_peer_status_wakes_a_blocked_mcp_call(db_path: Path) -> None:
+    async def scenario() -> None:
+        claude = make_server("claude", db_path)
+        codex = make_server("codex", db_path)
+
+        async with Client(claude) as claude_client, Client(codex) as codex_client:
+            results: list[str] = []
+
+            async with anyio.create_task_group() as tg:
+
+                async def blocked_call() -> None:
+                    results.append(
+                        text_of(
+                            await claude_client.call_tool("wait_for_mail", {"timeout_seconds": 20})
+                        )
+                    )
+
+                async def peer() -> None:
+                    await anyio.sleep(0.2)
+                    await codex_client.call_tool(
+                        "set_status",
+                        {
+                            "status": "usage_exhausted",
+                            "reason": "weekly cap reached",
+                            "resume_after": "2026-08-09T00:00:00Z",
+                        },
+                    )
+
+                tg.start_soon(blocked_call)
+                tg.start_soon(peer)
+
+            assert "peer_unavailable" in results[0]
+            assert "weekly cap reached" in results[0]
+
+    anyio.run(scenario)
+
+
+def test_an_agent_can_only_set_its_own_status(db_path: Path) -> None:
+    async def scenario() -> None:
+        async with Client(make_server("codex", db_path)) as client:
+            schema = {
+                tool.name: tool.input_schema
+                for tool in (await client.list_tools()).tools
+            }["set_status"]
+            # No agent parameter exists, so there is nothing to point elsewhere.
+            assert set(schema.get("properties", {})) == {"status", "reason", "resume_after"}
+
+            await client.call_tool("set_status", {"status": "busy", "reason": "implementing"})
+            assert MessageStore(db_path).get_status("codex").status == "busy"
+            # Setting its own status says nothing about the other agent.
+            assert MessageStore(db_path).get_status("claude").status == "unknown"
+
+        # Leaving the context stops the server, which is a direct observation
+        # that this client went away.
+        assert MessageStore(db_path).get_status("codex").status == "client_closed"
+
+    anyio.run(scenario)

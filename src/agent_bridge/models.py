@@ -67,9 +67,50 @@ class ThreadSummary:
 
 @dataclass(frozen=True, slots=True)
 class AgentStatus:
+    """An agent's reported availability, plus what the bridge itself observes.
+
+    ``status`` is always something an agent, its client, or the operator
+    reported. ``last_seen_at`` is observed by the bridge. The two are kept
+    separate on purpose: silence is not evidence of a usage limit.
+    """
+
     id: str
     unread: int
     last_seen_at: str | None
+    status: str = "unknown"
+    status_changed_at: str | None = None
+    status_reason: str | None = None
+    resume_after: str | None = None
+    status_source: str = "unknown"
+    wait_cancel_seq: int = 0
+
+    @staticmethod
+    def unknown(agent: str) -> "AgentStatus":
+        """The record for an agent that has never connected."""
+        return AgentStatus(id=agent, unread=0, last_seen_at=None)
+
+    @property
+    def is_unavailable(self) -> bool:
+        from .config import UNAVAILABLE_STATUSES
+
+        return self.status in UNAVAILABLE_STATUSES
+
+    def seconds_since_seen(self) -> float | None:
+        if self.last_seen_at is None:
+            return None
+        seen = datetime.fromisoformat(self.last_seen_at)
+        return (datetime.now(timezone.utc) - seen).total_seconds()
+
+
+@dataclass(frozen=True, slots=True)
+class WaitOutcome:
+    """Why a ``wait_for_event`` call returned."""
+
+    reason: str
+    waited_seconds: float
+    messages: tuple[Message, ...] = ()
+    peer: AgentStatus | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

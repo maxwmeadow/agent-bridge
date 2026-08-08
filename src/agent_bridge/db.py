@@ -15,7 +15,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -51,6 +51,18 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "CREATE INDEX idx_messages_inbox ON messages(recipient, read_at, created_at)",
         "CREATE INDEX idx_messages_thread ON messages(thread_id, created_at)",
         "CREATE INDEX idx_threads_updated ON threads(updated_at DESC)",
+    ),
+    2: (
+        # Availability records. Reported by agents, never inferred from silence.
+        "ALTER TABLE agents ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'",
+        "ALTER TABLE agents ADD COLUMN status_changed_at TEXT",
+        "ALTER TABLE agents ADD COLUMN status_reason TEXT",
+        "ALTER TABLE agents ADD COLUMN resume_after TEXT",
+        # Who reported it: 'self' (the agent), 'cli' (the operator), 'peer'.
+        "ALTER TABLE agents ADD COLUMN status_source TEXT NOT NULL DEFAULT 'unknown'",
+        # Bumped to cancel this agent's in-flight waits. Waiters compare the
+        # value they started with, so a cancel can never be missed.
+        "ALTER TABLE agents ADD COLUMN wait_cancel_seq INTEGER NOT NULL DEFAULT 0",
     ),
 }
 
