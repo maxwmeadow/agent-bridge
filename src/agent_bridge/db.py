@@ -15,7 +15,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -79,6 +79,37 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE agents ADD COLUMN usage_resets_at TEXT",
         "ALTER TABLE agents ADD COLUMN usage_source TEXT",
         "ALTER TABLE agents ADD COLUMN usage_sampled_at TEXT",
+    ),
+    4: (
+        # A live client session that can be woken. Registered by the client's
+        # own lifecycle hooks, not guessed at.
+        """
+        CREATE TABLE client_sessions (
+            id              TEXT PRIMARY KEY,
+            agent           TEXT NOT NULL,
+            client_type     TEXT NOT NULL,
+            provider        TEXT,
+            project         TEXT,
+            registered_at   TEXT NOT NULL,
+            last_seen_at    TEXT NOT NULL,
+            state           TEXT NOT NULL,
+            wake_method     TEXT NOT NULL,
+            wake_generation INTEGER NOT NULL DEFAULT 0,
+            auto_wakes      INTEGER NOT NULL DEFAULT 0,
+            metadata_json   TEXT
+        )
+        """,
+        "CREATE INDEX idx_sessions_agent ON client_sessions(agent, last_seen_at DESC)",
+        # Message semantics. Defaults keep every pre-existing row meaningful:
+        # a V1 message reads as a handoff that wants an answer.
+        "ALTER TABLE messages ADD COLUMN intent TEXT NOT NULL DEFAULT 'handoff'",
+        "ALTER TABLE messages ADD COLUMN requires_response INTEGER NOT NULL DEFAULT 1",
+        # Set once a wake for this message has actually been delivered, so a
+        # restart cannot re-ring the doorbell for mail already announced.
+        "ALTER TABLE messages ADD COLUMN wake_notified_at TEXT",
+        # Held while an agent is blocked inside wait_for_event. Self-expiring,
+        # so a crashed waiter cannot suppress wakes forever.
+        "ALTER TABLE agents ADD COLUMN wait_lease_until TEXT",
     ),
 }
 

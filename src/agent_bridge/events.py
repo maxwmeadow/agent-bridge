@@ -21,6 +21,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import anyio
 
@@ -229,6 +230,13 @@ async def wait_for_event(
         ",".join(name for name in known_agents() if name != agent),
     )
 
+    # Publish a lease so the Stop-hook doorbell knows an in-turn waiter is
+    # live and defers to it instead of injecting a redundant second turn.
+    lease_until = (
+        datetime.now(timezone.utc) + timedelta(seconds=timeout + 5)
+    ).isoformat(timespec="microseconds")
+    store.set_wait_lease(agent, lease_until)
+
     next_heartbeat = started + HEARTBEAT_SECONDS
     try:
         while True:
@@ -285,3 +293,7 @@ async def wait_for_event(
     except anyio.get_cancelled_exc_class():
         log.info("wait cancelled by client agent=%s after=%.2fs", agent, time.monotonic() - started)
         raise
+    finally:
+        # Release the lease on every path, including cancellation, so the
+        # doorbell is not suppressed by a waiter that has gone.
+        store.set_wait_lease(agent, None)

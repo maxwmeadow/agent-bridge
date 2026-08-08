@@ -29,10 +29,18 @@ class Message:
     created_at: str
     read_at: str | None
     context: dict[str, str] = field(default_factory=dict)
+    intent: str = "handoff"
+    requires_response: bool = True
+    wake_notified_at: str | None = None
 
     @property
     def is_unread(self) -> bool:
         return self.read_at is None
+
+    @property
+    def wants_wake(self) -> bool:
+        """Whether this message should ring the recipient's doorbell."""
+        return self.requires_response and self.wake_notified_at is None
 
     @staticmethod
     def from_row(row: sqlite3.Row) -> "Message":
@@ -48,6 +56,9 @@ class Message:
             created_at=row["created_at"],
             read_at=row["read_at"],
             context=json.loads(raw) if raw else {},
+            intent=row["intent"],
+            requires_response=bool(row["requires_response"]),
+            wake_notified_at=row["wake_notified_at"],
         )
 
 

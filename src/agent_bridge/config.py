@@ -113,6 +113,20 @@ USAGE_SOURCES: tuple[str, ...] = (
 )
 
 
+def require_intent(intent: str) -> str:
+    normalized = intent.strip().lower()
+    if normalized not in MESSAGE_INTENTS:
+        raise ValidationError(
+            f"Unknown intent {intent!r}. Valid intents: {', '.join(MESSAGE_INTENTS)}."
+        )
+    return normalized
+
+
+def default_requires_response(intent: str) -> bool:
+    """Whether an intent wants the peer woken, absent an explicit choice."""
+    return intent not in NON_WAKING_INTENTS
+
+
 def require_failure_kind(kind: str) -> str:
     normalized = kind.strip().lower()
     if normalized not in FAILURE_KINDS:
@@ -152,6 +166,54 @@ def poll_interval() -> float:
     if not 0.001 <= value <= 5.0:
         raise ValidationError(f"{POLL_INTERVAL_ENV} must be between 0.001 and 5 seconds.")
     return value
+
+
+# --- sessions and wake-up ---------------------------------------------------
+#: Client session lifecycle states. Reported by the client's own hooks.
+SESSION_STATES: tuple[str, ...] = (
+    "active",  # generating or running tools
+    "idle",  # turn ended, sitting at the prompt, doorbell armed
+    "waiting",  # blocked inside wait_for_event
+    "closed",  # SessionEnd fired
+    "stale",  # not seen for too long
+)
+
+#: How a session can be woken. One real adapter today, room for another.
+WAKE_METHODS: tuple[str, ...] = (
+    "stop_hook_rewake",  # Claude Code asyncRewake Stop hook
+    "none",  # no idle wake available (Codex today)
+)
+
+#: A session not seen for this long is treated as stale and never targeted.
+SESSION_STALE_SECONDS = 30 * 60
+
+#: Message intents. Optional and backward compatible; existing rows read as
+#: ``handoff``.
+MESSAGE_INTENTS: tuple[str, ...] = (
+    "info",
+    "question",
+    "proposal",
+    "review_request",
+    "review_result",
+    "handoff",
+    "blocker",
+    "objection",
+    "decision",
+)
+
+#: Intents that do not wake the peer by default. These are the ones that end
+#: an exchange rather than continue it -- the ping-pong killers.
+NON_WAKING_INTENTS: frozenset[str] = frozenset({"info", "decision", "review_result"})
+
+#: Circuit breaker. Consecutive automatic wakes allowed for one session with
+#: no human input in between. Reset by UserPromptSubmit. This is the backstop
+#: that stops two agents from politely acknowledging each other forever.
+MAX_CONSECUTIVE_AUTO_WAKES = 6
+
+#: How long the Stop-hook doorbell stays armed after a turn ends. Kept just
+#: inside Claude Code's 600s default command-hook timeout so the waiter
+#: retires on its own terms rather than being killed mid-claim.
+DOORBELL_SECONDS = 570
 
 
 def require_valid_status(status: str) -> str:

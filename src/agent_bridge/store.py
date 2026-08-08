@@ -21,7 +21,9 @@ from .config import (
     MAX_SUBJECT_CHARS,
     USAGE_SOURCES,
     USAGE_WINDOWS,
+    default_requires_response,
     known_agents,
+    require_intent,
     require_failure_kind,
     require_known_agent,
     require_valid_status,
@@ -345,8 +347,15 @@ class MessageStore:
         context: dict[str, str] | None = None,
         thread_id: str | None = None,
         reply_to_id: str | None = None,
+        intent: str | None = None,
+        requires_response: bool | None = None,
     ) -> Message:
-        """Insert a message, creating a thread when this starts a new one."""
+        """Insert a message, creating a thread when this starts a new one.
+
+        ``intent`` and ``requires_response`` are optional. They only govern
+        whether the recipient's doorbell rings; delivery to the mailbox is
+        unconditional either way.
+        """
         sender = require_known_agent(sender)
         recipient = require_known_agent(recipient)
         if sender == recipient:
@@ -357,6 +366,12 @@ class MessageStore:
         subject = _clean_text(subject, field="subject", limit=MAX_SUBJECT_CHARS)
         body = _clean_text(body, field="body", limit=MAX_BODY_CHARS)
         metadata = _clean_context(context)
+        resolved_intent = require_intent(intent) if intent else "handoff"
+        wants_reply = (
+            default_requires_response(resolved_intent)
+            if requires_response is None
+            else bool(requires_response)
+        )
 
         now = utc_now()
         message_id = ids.new_message_id()
@@ -376,8 +391,9 @@ class MessageStore:
                 """
                 INSERT INTO messages (
                     id, thread_id, reply_to_id, sender, recipient,
-                    subject, body, metadata_json, created_at, read_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    subject, body, metadata_json, created_at, read_at,
+                    intent, requires_response, wake_notified_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
                 """,
                 (
                     message_id,
@@ -389,15 +405,19 @@ class MessageStore:
                     body,
                     json.dumps(metadata) if metadata else None,
                     now,
+                    resolved_intent,
+                    1 if wants_reply else 0,
                 ),
             )
 
         log.info(
-            "message sent id=%s from=%s to=%s thread=%s body_chars=%d",
+            "message sent id=%s from=%s to=%s thread=%s intent=%s wake=%s body_chars=%d",
             message_id,
             sender,
             recipient,
             thread_id,
+            resolved_intent,
+            wants_reply,
             len(body),
         )
         return Message(
@@ -411,7 +431,88 @@ class MessageStore:
             created_at=now,
             read_at=None,
             context=metadata,
+            intent=resolved_intent,
+            requires_response=wants_reply,
         )
+
+    # ------------------------------------------------------- wake bookkeeping
+
+    def pending_wake_messages(self, agent: str) -> list[Message]:
+        """Unread mail for ``agent`` that should ring the doorbell.
+
+        Excludes messages already announced: a restart must not re-ring for
+        mail the recipient was already told about.
+        """
+        agent = require_known_agent(agent)
+        with db.session(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM messages
+                WHERE recipient = ?
+                  AND read_at IS NULL
+                  AND requires_response = 1
+                  AND wake_notified_at IS NULL
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (agent,),
+            ).fetchall()
+        return [Message.from_row(row) for row in rows]
+
+    def mark_wake_notified(self, message_ids: list[str]) -> int:
+        """Stamp messages as announced. Coalescing happens here.
+
+        One doorbell ring covers every pending message, so three messages
+        arriving together produce one wake, not three.
+        """
+        if not message_ids:
+            return 0
+        now = utc_now()
+        placeholders = ",".join("?" for _ in message_ids)
+        with db.session(self.db_path) as conn, conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE messages SET wake_notified_at = ?
+                WHERE id IN ({placeholders}) AND wake_notified_at IS NULL
+                """,
+                (now, *message_ids),
+            )
+        return int(cursor.rowcount)
+
+    # ------------------------------------------------------------ wait lease
+
+    def set_wait_lease(self, agent: str, until: str | None) -> None:
+        """Publish that this agent is blocked in ``wait_for_event`` until ``until``.
+
+        The doorbell reads this to avoid a redundant second wake. It is a
+        lease rather than a flag so a crashed waiter expires on its own.
+        """
+        agent = require_known_agent(agent)
+        now = utc_now()
+        with db.session(self.db_path) as conn, conn:
+            # Upsert: an agent that has only ever waited may have no row yet,
+            # and a plain UPDATE would silently store nothing.
+            conn.execute(
+                """
+                INSERT INTO agents (id, first_seen_at, last_seen_at, wait_lease_until)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET wait_lease_until = excluded.wait_lease_until
+                """,
+                (agent, now, now, until),
+            )
+
+    def has_active_wait(self, agent: str) -> bool:
+        """Whether an in-turn waiter currently holds a live lease."""
+        agent = require_known_agent(agent)
+        with db.session(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT wait_lease_until FROM agents WHERE id = ?", (agent,)
+            ).fetchone()
+        if row is None or row[0] is None:
+            return False
+        try:
+            return datetime.fromisoformat(row[0]) > datetime.now(timezone.utc)
+        except ValueError:  # pragma: no cover - written by us, always ISO
+            return False
 
     def reply(
         self,
@@ -420,6 +521,8 @@ class MessageStore:
         message_id: str,
         body: str,
         context: dict[str, str] | None = None,
+        intent: str | None = None,
+        requires_response: bool | None = None,
     ) -> Message:
         """Reply to a message, keeping the thread and flipping the direction."""
         sender = require_known_agent(sender)
@@ -441,6 +544,8 @@ class MessageStore:
             context=context,
             thread_id=original.thread_id,
             reply_to_id=original.id,
+            intent=intent,
+            requires_response=requires_response,
         )
 
     # --------------------------------------------------------------- reading

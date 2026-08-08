@@ -22,6 +22,7 @@ from .config import (
     FAILURE_KINDS,
     MAX_WAIT_SECONDS,
     USAGE_WINDOWS,
+    WAKE_METHODS,
     database_path,
     known_agents,
     log_path,
@@ -29,8 +30,11 @@ from .config import (
 )
 from .errors import BridgeError
 from .events import EventHub, wait_for_event
+from .sessions import SessionRegistry
+from .wake import plan_wake
 from .formatting import (
     format_agent_status,
+    format_session,
     format_inbox,
     format_message,
     format_status,
@@ -113,6 +117,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     codex.add_argument("--agent", default="codex", help="Which agent the sample belongs to.")
 
+    sessions = sub.add_parser("sessions", help="List client sessions the bridge knows about.")
+    sessions.add_argument("--agent", default=None)
+
+    session_show = sub.add_parser("session", help="Show or manage one session.")
+    session_sub = session_show.add_subparsers(dest="session_command", required=True)
+    show = session_sub.add_parser("show", help="Show one session in detail.")
+    show.add_argument("session_id")
+    register = session_sub.add_parser("register", help="Register a session by hand.")
+    register.add_argument("session_id")
+    register.add_argument("--agent", required=True)
+    register.add_argument("--client-type", default="claude_code")
+    register.add_argument("--provider", default=None)
+    register.add_argument("--project", default=None)
+    register.add_argument("--wake-method", choices=WAKE_METHODS, default="stop_hook_rewake")
+    close = session_sub.add_parser("close", help="Mark a session closed.")
+    close.add_argument("session_id")
+    session_sub.add_parser("prune", help="Delete closed and long-stale sessions.")
+
+    pending = sub.add_parser(
+        "pending-wakes", help="Show mail that would ring an agent's doorbell."
+    )
+    pending.add_argument("agent", nargs="?", default=None)
+
+    target = sub.add_parser(
+        "wake-target", help="Show which session would be woken for an agent, and why."
+    )
+    target.add_argument("agent")
+    target.add_argument("--project", default=None)
+
     inbox = sub.add_parser("inbox", help="List messages addressed to an agent.")
     inbox.add_argument("agent", help="Agent whose inbox to list.")
     inbox.add_argument("--all", action="store_true", help="Include messages already read.")
@@ -194,6 +227,70 @@ def run(args: argparse.Namespace) -> int:
         )
         print(format_agent_status(record))
         return 0
+
+    if args.command == "sessions":
+        registry = SessionRegistry(db_file)
+        found = registry.list_all(args.agent)
+        if not found:
+            print("No client sessions registered.")
+            return 0
+        print(f"{len(found)} session(s):")
+        for session in found:
+            print()
+            print(format_session(session))
+        return 0
+
+    if args.command == "session":
+        registry = SessionRegistry(db_file)
+        if args.session_command == "show":
+            print(format_session(registry.get(args.session_id)))
+            return 0
+        if args.session_command == "register":
+            registered = registry.register(
+                session_id=args.session_id,
+                agent=args.agent,
+                client_type=args.client_type,
+                provider=args.provider,
+                project=args.project,
+                wake_method=args.wake_method,
+            )
+            print(format_session(registered))
+            return 0
+        if args.session_command == "close":
+            registry.close(args.session_id)
+            print(f"Closed {args.session_id}.")
+            return 0
+        if args.session_command == "prune":
+            print(f"Pruned {registry.prune()} session(s).")
+            return 0
+
+    if args.command == "pending-wakes":
+        agents = [require_known_agent(args.agent)] if args.agent else list(known_agents())
+        any_pending = False
+        for agent in agents:
+            pending = store.pending_wake_messages(agent)
+            if not pending:
+                print(f"{agent}: nothing pending.")
+                continue
+            any_pending = True
+            print(f"{agent}: {len(pending)} message(s) would ring the doorbell:")
+            for message in pending:
+                print(
+                    f"  [{message.id}] from {message.sender} "
+                    f"intent={message.intent} thread={message.thread_id}"
+                )
+        return 0 if any_pending else 3
+
+    if args.command == "wake-target":
+        registry = SessionRegistry(db_file)
+        decision = plan_wake(
+            store, registry, recipient=require_known_agent(args.agent), project=args.project
+        )
+        print(decision.describe())
+        if decision.target is not None:
+            print()
+            print(format_session(decision.target))
+        return 0 if decision.deliverable else 3
 
     if args.command == "record-failure":
         record = store.record_failure(

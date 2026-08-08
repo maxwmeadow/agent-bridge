@@ -8,8 +8,13 @@ into ``read_message``, ``reply``, or ``mark_read``.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .models import AgentStatus, BridgeStatus, Message, ThreadSummary, WaitOutcome
 from .store import preview
+
+if TYPE_CHECKING:  # avoids a cycle: sessions imports nothing from here
+    from .sessions import ClientSession
 
 
 def short_time(timestamp: str) -> str:
@@ -200,6 +205,25 @@ def format_agent_status(status: AgentStatus) -> str:
             f"  note:          not seen for {idle / 60:.0f} minutes "
             "(observation only; status is unchanged)"
         )
+    return "\n".join(lines)
+
+
+def format_session(session: "ClientSession") -> str:
+    """One client session, as a debugging report."""
+    lines = [
+        f"[{session.id}]",
+        f"  agent:       {session.agent}",
+        f"  client:      {session.client_type}"
+        + (f" ({session.provider})" if session.provider else ""),
+        f"  project:     {session.project or '-'}",
+        f"  state:       {session.state}" + ("  STALE" if session.is_stale() else ""),
+        f"  wake method: {session.wake_method}",
+        f"  registered:  {short_time(session.registered_at)}",
+        f"  last seen:   {short_time(session.last_seen_at)}",
+        f"  auto wakes:  {session.auto_wakes} consecutive (generation "
+        f"{session.wake_generation})",
+        f"  wakeable:    {'yes' if session.can_wake and not session.is_stale() else 'no'}",
+    ]
     return "\n".join(lines)
 
 
