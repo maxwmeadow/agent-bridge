@@ -127,6 +127,16 @@ def _ensure_session(ctx: HookContext) -> str | None:
 
 
 def handle_session_start(ctx: HookContext) -> int:
+    """Register the session and arm its doorbell straight away.
+
+    Arming here as well as on Stop is what makes a freshly opened window
+    reachable. Previously the doorbell only existed after a turn *ended*, so a
+    new window sat unwakeable until someone typed something into it -- which
+    defeats the point of idle delivery.
+
+    Requires the SessionStart hook to be configured with async + asyncRewake,
+    exactly like Stop.
+    """
     session_id = ctx.session_id
     if session_id is None:
         log.warning("SessionStart with no session_id; cannot register a wake target")
@@ -139,7 +149,7 @@ def handle_session_start(ctx: HookContext) -> int:
         project=ctx.cwd,
     )
     ctx.registry.prune()
-    return 0
+    return _run_doorbell(ctx, session_id)
 
 
 def handle_user_prompt_submit(ctx: HookContext) -> int:
@@ -189,7 +199,11 @@ def handle_stop(ctx: HookContext) -> int:
     if session_id is None:
         log.warning("Stop with no session_id; cannot arm the doorbell")
         return 0
+    return _run_doorbell(ctx, session_id)
 
+
+def _run_doorbell(ctx: HookContext, session_id: str) -> int:
+    """Block until peer mail arrives for this agent, then ask to be woken."""
     ctx.registry.touch(session_id, state="idle")
     generation = ctx.registry.next_wake_generation(session_id)
     interval = max(poll_interval(), 0.5)

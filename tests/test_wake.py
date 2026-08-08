@@ -486,7 +486,12 @@ def test_session_start_registers_and_session_end_closes(db_path: Path) -> None:
 
     def fire(payload: dict[str, object]) -> int:
         ctx = HookContext(store=store, registry=registry, agent="claude", payload=payload)
-        return hooks.HANDLERS[str(payload["hook_event_name"])](ctx)
+        original = hooks.DOORBELL_SECONDS
+        hooks.DOORBELL_SECONDS = 1  # type: ignore[assignment]
+        try:
+            return hooks.HANDLERS[str(payload["hook_event_name"])](ctx)
+        finally:
+            hooks.DOORBELL_SECONDS = original  # type: ignore[assignment]
 
     fire({"hook_event_name": "SessionStart", "session_id": "s1", "cwd": "C:/repos/app"})
     assert registry.get("s1").state == "idle"
@@ -502,14 +507,19 @@ def test_vs_code_reload_produces_a_new_session(db_path: Path) -> None:
     store = MessageStore(db_path)
 
     def start(session_id: str) -> None:
-        hooks.handle_session_start(
-            HookContext(
-                store=store,
-                registry=registry,
-                agent="claude",
-                payload={"session_id": session_id, "cwd": "C:/repos/app"},
+        original = hooks.DOORBELL_SECONDS
+        hooks.DOORBELL_SECONDS = 1  # type: ignore[assignment]
+        try:
+            hooks.handle_session_start(
+                HookContext(
+                    store=store,
+                    registry=registry,
+                    agent="claude",
+                    payload={"session_id": session_id, "cwd": "C:/repos/app"},
+                )
             )
-        )
+        finally:
+            hooks.DOORBELL_SECONDS = original  # type: ignore[assignment]
 
     start("before-reload")
     registry.close("before-reload")
@@ -679,6 +689,8 @@ def test_two_claude_code_profiles_get_separate_identities(
         )
 
         config = ServerConfig.resolve(None)
+        original = hooks.DOORBELL_SECONDS
+        hooks.DOORBELL_SECONDS = 1  # type: ignore[assignment]
         hooks.handle_session_start(
             HookContext(
                 store=store,
@@ -689,6 +701,7 @@ def test_two_claude_code_profiles_get_separate_identities(
                 provider=configured_provider(),
             )
         )
+        hooks.DOORBELL_SECONDS = original  # type: ignore[assignment]
 
     session_start("claude", "opus-window", "anthropic")
     session_start("codex", "gpt-window", "openai")
@@ -811,3 +824,31 @@ def test_the_other_agents_windows_are_irrelevant(db_path: Path) -> None:
     store.send(sender="codex", recipient="claude", subject="s", body="b")
 
     assert run_doorbell(db_path, session_id="claude-win") == REWAKE_EXIT_CODE
+
+
+def test_session_start_arms_a_doorbell_for_a_brand_new_window(db_path: Path) -> None:
+    """A freshly opened window is reachable without typing into it first.
+
+    Before this, the doorbell only existed after a turn *ended*, so a new
+    window sat unwakeable until someone prompted it -- which defeats idle
+    delivery entirely.
+    """
+    store = MessageStore(db_path)
+    store.send(sender="codex", recipient="claude", subject="waiting for you", body="b")
+
+    original = hooks.DOORBELL_SECONDS
+    hooks.DOORBELL_SECONDS = 5  # type: ignore[assignment]
+    try:
+        code = hooks.handle_session_start(
+            HookContext(
+                store=store,
+                registry=SessionRegistry(db_path),
+                agent="claude",
+                payload={"session_id": "fresh-window", "cwd": "C:/repos/app"},
+            )
+        )
+    finally:
+        hooks.DOORBELL_SECONDS = original  # type: ignore[assignment]
+
+    assert code == REWAKE_EXIT_CODE
+    assert SessionRegistry(db_path).get("fresh-window").auto_wakes == 1
