@@ -43,10 +43,10 @@ can send mail as the other.
 
 ## What it explicitly does NOT do
 
-- **No wake-up from idle.** A new message cannot start a turn in a panel that
-  is sitting idle. An agent can *choose* to block in `wait_for_mail` and be
-  woken promptly, but something has to put it there first. You still say
-  "check your agent-bridge inbox" to an idle agent.
+- **No idle wake-up for Codex.** Codex exposes no lifecycle hook that can
+  start a turn, so its sessions are never wake targets and `wait_for_event`
+  remains its mechanism. Claude Code *does* wake automatically — see
+  [Automatic wake-up](#automatic-wake-up).
 - **No model traffic.** It never calls the Anthropic or OpenAI API and needs no
   API key. It is a local tool the clients invoke, nothing more.
 - **No orchestration.** No schedulers, no tmux, no process management, no
@@ -218,6 +218,100 @@ are wired up automatically yet.
 Any status may follow any other. No transition graph is enforced: a client can
 die in any state, and rejecting a "wrong" transition would only preserve a
 staler record than the one being rejected.
+
+## Automatic wake-up
+
+A message sent to an **idle** Claude Code session starts a new turn there by
+itself. You no longer type "check your agent-bridge inbox."
+
+```
+codex sends  ──►  SQLite  ──►  armed Stop-hook doorbell  ──►  exit 2
+                                                              │
+                                          Claude wakes, reads via MCP, acts
+```
+
+**The mechanism.** Claude Code's `asyncRewake` hook option runs a hook in the
+background and wakes the model if it exits 2, showing its stderr as a system
+reminder. The bridge registers a `Stop` hook configured that way: when a turn
+ends, the hook keeps running, blocks on the database, and exits 2 the moment
+actionable peer mail appears. This is a documented Claude Code feature, not a
+workaround.
+
+One mechanism covers both timings:
+
+| Mail arrives… | What happens |
+| --- | --- |
+| While the agent is **busy** | The doorbell finds it immediately at the turn boundary — no unsafe mid-turn injection |
+| While the agent is **idle** | The doorbell is still armed and rings up to 570 s later |
+| While blocked in `wait_for_event` | The in-turn wait resolves instead; the doorbell defers and no second turn is created |
+
+**The doorbell is not the message.** The injected text carries ids, counts and
+sender names only — never a body, never a summary, never a conclusion. SQLite
+stays authoritative and the recipient reads the canonical thread through MCP.
+Peer text is data to be judged, not an instruction arriving with system
+authority.
+
+### Setup
+
+```bash
+claude mcp add --scope user --transport stdio agent-bridge -- "…\agent-bridge-mcp.exe" --agent claude
+```
+
+Then add to `~/.claude/settings.json` (keeping any hooks you already have):
+
+```json
+{
+  "hooks": {
+    "SessionStart":     [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 10}]}],
+    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 10}]}],
+    "Stop":             [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 600, "async": true, "asyncRewake": true}]}],
+    "StopFailure":      [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 10}]}],
+    "SessionEnd":       [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 10}]}]
+  }
+}
+```
+
+`async` + `asyncRewake` on `Stop` is what makes idle wake work. The others are
+bookkeeping: session registration, activity, failure, and shutdown.
+
+### Which session gets woken
+
+Sessions register themselves through their own lifecycle hooks; the bridge
+never invents one. Targeting is:
+
+1. a live session whose **project matches** the message's `project` context;
+2. otherwise the **most recently active** live session for that agent.
+
+"Live" means registered, not closed, and seen within 30 minutes. So a review
+request tagged for repo A wakes the window open on repo A, not the one on
+repo B.
+
+```bash
+agent-bridge sessions              # what the bridge thinks is alive
+agent-bridge wake-target claude    # who would be woken, and why
+agent-bridge pending-wakes         # mail that would ring a doorbell
+agent-bridge session prune         # drop closed and long-stale sessions
+```
+
+### Three brakes against runaway loops
+
+Automatic delivery makes acknowledgement ping-pong a real risk, so there are
+three independent stops:
+
+1. **Intent.** `info`, `decision` and `review_result` deliver without ringing.
+   Acknowledge with `intent=info` to end an exchange.
+2. **Announce-once.** Each message rings at most one doorbell, and several
+   messages coalesce into a single wake. A restart cannot re-ring for mail
+   already announced.
+3. **Circuit breaker.** After 6 consecutive automatic wakes with no human
+   input, wakes are suppressed and mail simply waits. Typing anything clears
+   it.
+
+The third brake needed a subtlety: Claude Code delivers the injected wake
+through the same path as a typed prompt, so `UserPromptSubmit` fires for the
+bridge's own injection about 113 ms later. A prompt that soon after a wake is
+treated as its echo, not as human input — otherwise the breaker would reset
+itself every cycle and never engage.
 
 ### Availability, failure, and usage are three different things
 

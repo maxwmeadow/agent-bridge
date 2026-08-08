@@ -195,6 +195,77 @@ documented payloads.
 
 ---
 
+## Automatic idle wake-up
+
+Checked 2026-08-08. The question: can an external event start a turn in a
+Claude Code session that is sitting idle at the prompt?
+
+| Mechanism | Verdict | Classification |
+| --- | --- | --- |
+| **`asyncRewake` hook option** | **Yes — this is the mechanism.** "Runs in the background and wakes Claude on exit code 2. Implies `async`. The hook's stderr, or stdout if stderr is empty, is shown to Claude as a system reminder." A `Stop` hook configured this way outlives the turn, so it can block on the bridge and ring later | **Official / documented**, and now empirically verified end to end |
+| **Channels** | An MCP server that pushes events into a running session — conceptually ideal, but a **research preview** requiring `claude --channels`, restricted to an Anthropic-maintained plugin allowlist, with custom servers needing `--dangerously-load-development-channels`. Not usable for a local bridge today | Official but unavailable |
+| **`Stop` hook with `decision: "block"`** | Prevents the turn from ending and continues the conversation. Useful only at a turn boundary; it cannot help a session that went idle five minutes ago | Official; complementary, not sufficient |
+| **`vscode://anthropic.claude-code/open?prompt=…`** | Pre-fills the prompt box but, per the docs, "is pre-filled but not submitted automatically" | Official but does not start a turn |
+| GUI/keystroke automation, clipboard injection | Explicitly out of scope | Rejected |
+
+**Chosen architecture.** One `Stop` hook with `async: true` and
+`asyncRewake: true`. When a turn ends, Claude Code starts it in the
+background; it registers a wake generation, blocks on SQLite, and exits 2 the
+moment actionable peer mail appears. One mechanism covers both cases: mail
+that arrived while the agent was busy is found immediately at the turn
+boundary, and mail that arrives later is found while the doorbell is still
+armed.
+
+### Verified live in the Claude Code VS Code panel
+
+Session `9fdb5b0d…`, 2026-08-08:
+
+```
+21:58:31Z  session registered (auto-registered by the Stop hook itself)
+21:58:31Z  doorbell armed generation=1 for 570s
+21:59:05Z  codex sends "Idle wake test"
+21:59:05Z  doorbell ringing  (sub-second detection)
+           -> new turn started with no human input
+           -> read the message through MCP, replied with intent=info
+```
+
+**Nobody typed anything.** That is the acceptance criterion for this release,
+met.
+
+### The defect live testing found
+
+`auto_wakes` read 0 immediately after a wake that should have set it to 1.
+The write at `21:59:06.077` — 113 ms after the ring — carried `state='active'`
+and a budget reset, which only `handle_user_prompt_submit` produces.
+
+**Claude Code delivers an `asyncRewake` through the same path as a typed
+prompt, so `UserPromptSubmit` fires for the bridge's own injection.** Left
+alone, every automatic wake would have cleared the consecutive-wake budget and
+the loop brake could never engage — precisely the runaway the budget exists to
+prevent, disabled by the thing it was guarding.
+
+Fixed in schema v5: `last_auto_wake_at` is recorded, and a prompt arriving
+within 10 s of an automatic wake is treated as that wake's echo rather than as
+human input. This is behaviour of the client, not documented anywhere, so it
+is worth re-checking after a Claude Code upgrade.
+
+### Known limits
+
+* The doorbell is armed for 570 s after each turn ends (inside Claude Code's
+  600 s default command-hook timeout). After that a truly idle session has no
+  live listener until the next turn ends. Activity re-arms it, so an ongoing
+  collaboration sustains itself; an overnight gap does not.
+* **Codex has no equivalent.** No documented lifecycle hook, no `asyncRewake`.
+  Codex sessions register with `wake_method="none"` and are never targeted;
+  `wait_for_event` remains its mechanism, and it is honest about the
+  asymmetry rather than pretending otherwise.
+* Bumping the schema breaks already-running MCP servers until they restart —
+  the migration guard correctly refuses to operate on a newer schema. Observed
+  during this release: the running server returned "Database schema version 5
+  is newer than this build supports". Restart both clients after upgrading.
+
+---
+
 ## Deliberately not relied upon
 
 - No Anthropic or OpenAI API key. The bridge never contacts a model provider,
