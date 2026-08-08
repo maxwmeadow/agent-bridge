@@ -27,6 +27,7 @@ EXPECTED_TOOLS = {
     "list_threads",
     "read_thread",
     "bridge_status",
+    "wait_for_event",
     "wait_for_mail",
     "set_status",
     "peer_status",

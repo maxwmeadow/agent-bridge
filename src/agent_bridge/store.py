@@ -14,16 +14,27 @@ from pathlib import Path
 
 from . import __version__, db, ids
 from .config import (
+    FAILURE_TO_STATUS,
     MAX_BODY_CHARS,
     MAX_CONTEXT_VALUE_CHARS,
     MAX_REASON_CHARS,
     MAX_SUBJECT_CHARS,
+    USAGE_SOURCES,
+    USAGE_WINDOWS,
     known_agents,
+    require_failure_kind,
     require_known_agent,
     require_valid_status,
 )
 from .errors import NotFoundError, PermissionDeniedError, ValidationError
-from .models import AgentStatus, BridgeStatus, Message, ThreadSummary, utc_now
+from .models import (
+    AgentStatus,
+    BridgeStatus,
+    Message,
+    ThreadSummary,
+    UsageSample,
+    utc_now,
+)
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +164,139 @@ class MessageStore:
             status,
             source,
             resume_after or "-",
+        )
+        return self.get_status(agent)
+
+    def record_failure(
+        self,
+        agent: str,
+        kind: str,
+        *,
+        detail: str | None = None,
+        source: str = "self",
+        resume_after: str | None = None,
+    ) -> AgentStatus:
+        """Record a client-reported failure, and project it onto availability.
+
+        The raw ``kind`` is kept exactly as the client reported it, so a
+        billing problem never becomes indistinguishable from a rate limit or
+        from Anthropic having a bad minute. Only the coarse availability
+        projection collapses them, and only via
+        :data:`~agent_bridge.config.FAILURE_TO_STATUS`.
+
+        Failure kinds with no availability meaning (``invalid_request``,
+        ``max_output_tokens``, ...) are recorded without changing status.
+        """
+        agent = require_known_agent(agent)
+        kind = require_failure_kind(kind)
+        if detail is not None:
+            detail = _clean_text(
+                detail, field="detail", limit=MAX_REASON_CHARS, allow_empty=True
+            ) or None
+        resume_after = _clean_resume_after(resume_after)
+
+        now = utc_now()
+        new_status = FAILURE_TO_STATUS.get(kind)
+
+        with db.session(self.db_path) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO agents (
+                    id, first_seen_at, last_seen_at,
+                    last_failure_kind, last_failure_detail, last_failure_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    last_failure_kind   = excluded.last_failure_kind,
+                    last_failure_detail = excluded.last_failure_detail,
+                    last_failure_at     = excluded.last_failure_at
+                """,
+                (agent, now, now, kind, detail, now),
+            )
+            if new_status is not None:
+                # If no explicit resume hint was given, fall back to the last
+                # known reset time for this agent -- but only when it is still
+                # in the future, so a stale sample cannot invent one.
+                effective_resume = resume_after or _future_reset(conn, agent)
+                conn.execute(
+                    """
+                    UPDATE agents SET
+                        status            = ?,
+                        status_changed_at = ?,
+                        status_reason     = ?,
+                        status_source     = ?,
+                        resume_after      = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        new_status,
+                        now,
+                        detail or f"reported {kind}",
+                        source,
+                        effective_resume,
+                        agent,
+                    ),
+                )
+
+        log.info(
+            "failure recorded agent=%s kind=%s status=%s source=%s",
+            agent,
+            kind,
+            new_status or "(unchanged)",
+            source,
+        )
+        return self.get_status(agent)
+
+    def record_usage(
+        self,
+        agent: str,
+        *,
+        percent: float,
+        window: str,
+        resets_at: str | None,
+        source: str,
+    ) -> AgentStatus:
+        """Record a quota usage sample.
+
+        This never changes availability. Consuming quota is not the same as
+        running out of it, and treating a percentage as a health signal would
+        make the bridge start guessing -- the exact thing it must not do.
+        """
+        agent = require_known_agent(agent)
+        if window not in USAGE_WINDOWS:
+            raise ValidationError(
+                f"Unknown usage window {window!r}. Valid: {', '.join(USAGE_WINDOWS)}."
+            )
+        if source not in USAGE_SOURCES:
+            raise ValidationError(
+                f"Unknown usage source {source!r}. Valid: {', '.join(USAGE_SOURCES)}."
+            )
+        if not 0.0 <= percent <= 100.0:
+            raise ValidationError(f"usage percent must be between 0 and 100, got {percent}.")
+        resets_at = _clean_resume_after(resets_at)
+
+        now = utc_now()
+        with db.session(self.db_path) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO agents (
+                    id, first_seen_at, last_seen_at,
+                    usage_percent, usage_window, usage_resets_at, usage_source, usage_sampled_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    usage_percent    = excluded.usage_percent,
+                    usage_window     = excluded.usage_window,
+                    usage_resets_at  = excluded.usage_resets_at,
+                    usage_source     = excluded.usage_source,
+                    usage_sampled_at = excluded.usage_sampled_at
+                """,
+                (agent, now, now, float(percent), window, resets_at, source, now),
+            )
+        log.info(
+            "usage recorded agent=%s percent=%.1f window=%s source=%s",
+            agent,
+            percent,
+            window,
+            source,
         )
         return self.get_status(agent)
 
@@ -503,6 +647,17 @@ def _read_status(conn: sqlite3.Connection, agent: str) -> AgentStatus:
     unread = _count_unread(conn, agent)
     if row is None:
         return AgentStatus(id=agent, unread=unread, last_seen_at=None)
+
+    usage = None
+    if row["usage_sampled_at"] is not None and row["usage_percent"] is not None:
+        usage = UsageSample(
+            percent=float(row["usage_percent"]),
+            window=row["usage_window"],
+            resets_at=row["usage_resets_at"],
+            source=row["usage_source"],
+            sampled_at=row["usage_sampled_at"],
+        )
+
     return AgentStatus(
         id=agent,
         unread=unread,
@@ -513,7 +668,24 @@ def _read_status(conn: sqlite3.Connection, agent: str) -> AgentStatus:
         resume_after=row["resume_after"],
         status_source=row["status_source"],
         wait_cancel_seq=int(row["wait_cancel_seq"]),
+        last_failure_kind=row["last_failure_kind"],
+        last_failure_detail=row["last_failure_detail"],
+        last_failure_at=row["last_failure_at"],
+        usage=usage,
     )
+
+
+def _future_reset(conn: sqlite3.Connection, agent: str) -> str | None:
+    """The agent's last known quota reset time, if it has not already passed."""
+    row = conn.execute("SELECT usage_resets_at FROM agents WHERE id = ?", (agent,)).fetchone()
+    if row is None or row[0] is None:
+        return None
+    resets_at: str = row[0]
+    try:
+        when = datetime.fromisoformat(resets_at)
+    except ValueError:  # pragma: no cover - written through _clean_resume_after
+        return None
+    return resets_at if when > datetime.now(timezone.utc) else None
 
 
 def _count_unread(conn: sqlite3.Connection, agent: str) -> int:

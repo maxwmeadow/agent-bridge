@@ -246,17 +246,16 @@ def build_server(
         with _tool_errors("bridge_status"):
             return format_status(store.status(me))
 
-    @server.tool(
-        description=(
-            "Block until something happens on the bridge, instead of polling. "
-            f"Returns as soon as {me} has unread mail, a peer becomes unavailable or "
-            "available again, the wait is cancelled, or the timeout expires. "
-            "If mail is already waiting it returns immediately. "
-            f"Use this when you have handed work to {peers} and have nothing to do until "
-            "they answer. The reason field says why it returned."
-        )
+    _WAIT_DESCRIPTION = (
+        "Block until something happens on the bridge, instead of polling. "
+        f"Returns as soon as {me} has unread mail, a peer becomes unavailable or "
+        "available again, the wait is cancelled, or the timeout expires. "
+        "If mail is already waiting it returns immediately. "
+        f"Use this when you have handed work to {peers} and have nothing to do until "
+        "they answer. The reason field says why it returned."
     )
-    async def wait_for_mail(
+
+    async def _wait(
         ctx: Context,
         timeout_seconds: Annotated[
             int,
@@ -278,7 +277,7 @@ def build_server(
             ),
         ] = True,
     ) -> str:
-        with _tool_errors("wait_for_mail"):
+        with _tool_errors("wait_for_event"):
             async def heartbeat(elapsed: float, total: float) -> None:
                 # Keeps the client's idle timer reset and shows the call is alive.
                 try:
@@ -295,6 +294,16 @@ def build_server(
                 heartbeat=heartbeat,
             )
             return format_wait_outcome(me, outcome)
+
+    # The canonical name. Peer availability changes are first-class wake
+    # reasons now, so "mail" undersells what this waits for.
+    server.add_tool(_wait, name="wait_for_event", description=_WAIT_DESCRIPTION)
+    # Kept so existing prompts and habits keep working.
+    server.add_tool(
+        _wait,
+        name="wait_for_mail",
+        description="Deprecated alias for wait_for_event. Identical behaviour.",
+    )
 
     @server.tool(
         description=(

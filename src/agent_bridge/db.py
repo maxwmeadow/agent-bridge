@@ -15,7 +15,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -63,6 +63,22 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         # Bumped to cancel this agent's in-flight waits. Waiters compare the
         # value they started with, so a cancel can never be missed.
         "ALTER TABLE agents ADD COLUMN wait_cancel_seq INTEGER NOT NULL DEFAULT 0",
+    ),
+    3: (
+        # Three separate concerns, deliberately not merged into one column:
+        #
+        #   availability -- can this agent make progress right now
+        #   failure      -- what went wrong last, in the client's own vocabulary
+        #   usage        -- how much quota has been consumed, which is a metric
+        #                   and NOT an availability signal
+        "ALTER TABLE agents ADD COLUMN last_failure_kind TEXT",
+        "ALTER TABLE agents ADD COLUMN last_failure_detail TEXT",
+        "ALTER TABLE agents ADD COLUMN last_failure_at TEXT",
+        "ALTER TABLE agents ADD COLUMN usage_percent REAL",
+        "ALTER TABLE agents ADD COLUMN usage_window TEXT",
+        "ALTER TABLE agents ADD COLUMN usage_resets_at TEXT",
+        "ALTER TABLE agents ADD COLUMN usage_source TEXT",
+        "ALTER TABLE agents ADD COLUMN usage_sampled_at TEXT",
     ),
 }
 

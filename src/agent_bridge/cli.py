@@ -14,11 +14,14 @@ from pathlib import Path
 import anyio
 
 from . import __version__
+from .codex_usage import read_latest_usage
 from .config import (
     AGENT_STATUSES,
     DEFAULT_AGENTS,
     DEFAULT_WAIT_SECONDS,
+    FAILURE_KINDS,
     MAX_WAIT_SECONDS,
+    USAGE_WINDOWS,
     database_path,
     known_agents,
     log_path,
@@ -78,6 +81,37 @@ def build_parser() -> argparse.ArgumentParser:
     cancel = sub.add_parser("cancel-wait", help="Wake an agent's blocked waiters.")
     cancel.add_argument("agent")
     cancel.add_argument("--reason", default=None)
+
+    failure = sub.add_parser("record-failure", help="Record a client failure for an agent.")
+    failure.add_argument("agent")
+    failure.add_argument("kind", choices=FAILURE_KINDS)
+    failure.add_argument("--detail", default=None)
+    failure.add_argument(
+        "--resume-after", default=None, help="ISO-8601 time when it should recover."
+    )
+
+    usage = sub.add_parser("record-usage", help="Record a quota usage sample (a metric only).")
+    usage.add_argument("agent")
+    usage.add_argument("percent", type=float)
+    usage.add_argument("--window", choices=USAGE_WINDOWS, default="five_hour")
+    usage.add_argument("--resets-at", default=None)
+
+    codex = sub.add_parser(
+        "codex-usage",
+        help=(
+            "Read Codex's local session rollout files for a usage sample. "
+            "Opt-in and best-effort: the format is undocumented."
+        ),
+    )
+    codex.add_argument(
+        "--apply",
+        action="store_true",
+        help="Store the sample against the codex agent instead of only printing it.",
+    )
+    codex.add_argument(
+        "--sessions-dir", type=Path, default=None, help="Override ~/.codex/sessions."
+    )
+    codex.add_argument("--agent", default="codex", help="Which agent the sample belongs to.")
 
     inbox = sub.add_parser("inbox", help="List messages addressed to an agent.")
     inbox.add_argument("agent", help="Agent whose inbox to list.")
@@ -159,6 +193,60 @@ def run(args: argparse.Namespace) -> int:
             source="cli",
         )
         print(format_agent_status(record))
+        return 0
+
+    if args.command == "record-failure":
+        record = store.record_failure(
+            args.agent,
+            args.kind,
+            detail=args.detail,
+            source="cli",
+            resume_after=args.resume_after,
+        )
+        print(format_agent_status(record))
+        return 0
+
+    if args.command == "record-usage":
+        record = store.record_usage(
+            args.agent,
+            percent=args.percent,
+            window=args.window,
+            resets_at=args.resets_at,
+            source="manual",
+        )
+        print(format_agent_status(record))
+        return 0
+
+    if args.command == "codex-usage":
+        sample = read_latest_usage(args.sessions_dir)
+        if sample is None:
+            print(
+                "No Codex usage sample found. This reader is best-effort: Codex may "
+                "not have written a rollout file yet, or its format may have changed.",
+                file=sys.stderr,
+            )
+            return 1
+        reached = "yes" if sample.limit_reached else "no"
+        print(
+            f"{sample.percent:.1f}% of {sample.window} window"
+            + (f", resets {sample.resets_at}" if sample.resets_at else "")
+            + f"\nplan: {sample.plan_type or 'unknown'}   limit reached: {reached}"
+            f"\nsource: {sample.source_file} (undocumented format, best effort)"
+        )
+        if args.apply:
+            record = store.record_usage(
+                args.agent,
+                percent=sample.percent,
+                window=sample.window,
+                resets_at=sample.resets_at,
+                source="codex_rollout",
+            )
+            print()
+            print(format_agent_status(record))
+            print(
+                "\nRecorded as a usage metric only. Availability is unchanged: "
+                "consuming quota is not the same as running out."
+            )
         return 0
 
     if args.command == "cancel-wait":

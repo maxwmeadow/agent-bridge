@@ -66,6 +66,27 @@ class ThreadSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageSample:
+    """How much of a quota window an agent has consumed.
+
+    This is a *metric*. A high percentage is not unavailability: an agent at
+    99% of its five-hour window can still do plenty of work. Only a reported
+    failure or an explicit status makes an agent unavailable.
+    """
+
+    percent: float
+    window: str
+    resets_at: str | None
+    source: str
+    sampled_at: str
+
+    @property
+    def is_official_source(self) -> bool:
+        """Whether the sample came from a documented, supported mechanism."""
+        return self.source in ("claude_statusline", "manual")
+
+
+@dataclass(frozen=True, slots=True)
 class AgentStatus:
     """An agent's reported availability, plus what the bridge itself observes.
 
@@ -77,12 +98,19 @@ class AgentStatus:
     id: str
     unread: int
     last_seen_at: str | None
+    # --- availability ---
     status: str = "unknown"
     status_changed_at: str | None = None
     status_reason: str | None = None
     resume_after: str | None = None
     status_source: str = "unknown"
     wait_cancel_seq: int = 0
+    # --- failure (what went wrong last, in the client's own vocabulary) ---
+    last_failure_kind: str | None = None
+    last_failure_detail: str | None = None
+    last_failure_at: str | None = None
+    # --- usage (a metric, never an availability signal) ---
+    usage: "UsageSample | None" = None
 
     @staticmethod
     def unknown(agent: str) -> "AgentStatus":

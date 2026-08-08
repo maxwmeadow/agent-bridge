@@ -43,8 +43,10 @@ can send mail as the other.
 
 ## What it explicitly does NOT do
 
-- **No wake-up.** A new message does not start a turn in the other panel. You
-  still say "check your agent-bridge inbox." That is deliberate for V1.
+- **No wake-up from idle.** A new message cannot start a turn in a panel that
+  is sitting idle. An agent can *choose* to block in `wait_for_mail` and be
+  woken promptly, but something has to put it there first. You still say
+  "check your agent-bridge inbox" to an idle agent.
 - **No model traffic.** It never calls the Anthropic or OpenAI API and needs no
   API key. It is a local tool the clients invoke, nothing more.
 - **No orchestration.** No schedulers, no tmux, no process management, no
@@ -165,6 +167,145 @@ A session looks like this:
 | `list_threads(limit=10)` | Recent conversations, participants, unread counts |
 | `read_thread(thread_id, limit=50)` | Every message in one thread, oldest first |
 | `bridge_status()` | Identity, database path, schema version, unread counts |
+| `wait_for_event(timeout_seconds=60, wake_on_peer_status=true)` | Block until something happens instead of polling |
+| `wait_for_mail(...)` | Deprecated alias for `wait_for_event`, identical behaviour |
+| `set_status(status, reason?, resume_after?)` | Report your own availability |
+| `peer_status()` | What the other agent last reported |
+
+### Waiting instead of polling
+
+`wait_for_mail` blocks the tool call until one of these happens, and says
+which in its `reason`:
+
+| Reason | Meaning |
+| --- | --- |
+| `message_received` | Unread mail is waiting. Returns the inbox listing |
+| `peer_unavailable` | A peer reported `usage_exhausted`, `auth_error`, `client_closed`, or `unresponsive` |
+| `peer_available` | A peer that was not available reported itself available again |
+| `cancelled` | Someone ran `agent-bridge cancel-wait` |
+| `timeout` | Nothing happened in the allotted time |
+| `bridge_shutdown` | The server is stopping. Nothing is lost |
+| `goal_cancelled` | Reserved for the future goal system; nothing produces it yet |
+
+If mail is already waiting, it returns immediately — it never blocks on
+something that already happened. A wait does not consume or mark messages, so
+two agents waiting on the same inbox both see it.
+
+Timeouts are clamped server-side to 1–600 seconds. Keep them at or under
+**120 seconds**: past two minutes, Claude Code v2.1.212+ moves the call to a
+background task, and the agent stops waiting inline and gets notified later
+instead. The wait emits a progress notification every 15 seconds so clients
+can see it is alive.
+
+### Availability
+
+Statuses are **reported, never inferred**:
+
+`available` · `busy` · `waiting` · `usage_exhausted` · `auth_error` ·
+`client_closed` · `unresponsive` · `unknown`
+
+Each record carries `last_seen_at` (observed by the bridge),
+`status_changed_at`, who reported it, an optional human-readable `reason`, and
+an optional `resume_after`.
+
+The bridge will never decide an agent is out of quota because it has gone
+quiet. Silence shows up as an observation ("not seen for 40 minutes") next to
+the unchanged reported status. See
+[docs/research.md](docs/research.md#detecting-usage-exhaustion-and-client-failure)
+for the official signals that could feed these statuses, and why none of them
+are wired up automatically yet.
+
+Any status may follow any other. No transition graph is enforced: a client can
+die in any state, and rejecting a "wrong" transition would only preserve a
+staler record than the one being rejected.
+
+### Availability, failure, and usage are three different things
+
+They are stored separately and must not be conflated:
+
+| Concern | Question it answers | Example |
+| --- | --- | --- |
+| **Availability** | Can this agent make progress now? | `usage_exhausted` |
+| **Failure** | What went wrong last, in the client's own words? | `rate_limit`, `billing_error`, `overloaded` |
+| **Usage** | How much quota is consumed? | 71% of `seven_day`, resets at ... |
+
+**A high usage percentage is not unavailability.** An agent at 99% of its
+window is still available; only a reported failure or an explicit status makes
+it otherwise. `record_usage` cannot change availability at all.
+
+Failures keep Claude Code's own vocabulary rather than collapsing into one
+bucket, and only project onto availability through a documented map:
+
+| `StopFailure.error_type` | Availability becomes |
+| --- | --- |
+| `rate_limit`, `billing_error` | `usage_exhausted` |
+| `authentication_failed`, `oauth_org_not_allowed` | `auth_error` |
+| `overloaded`, `server_error` | `unresponsive` — **never** `usage_exhausted` |
+| `invalid_request`, `model_not_found`, `max_output_tokens`, `unknown` | unchanged; the failure is recorded, availability is not touched |
+
+### Feeding availability automatically (Claude Code)
+
+`agent-bridge-hook` is a local process that reads Claude Code's hook JSON on
+stdin. **No model turn, no tokens, no cost** — the peer blocked in
+`wait_for_event` learns about a rate limit on its next poll.
+
+Register it in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "StopFailure": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "C:\\path\\to\\agent-bridge\\.venv\\Scripts\\python.exe",
+        "args": ["-m", "agent_bridge.hooks", "--agent", "claude"],
+        "timeout": 10
+      }]
+    }],
+    "SessionEnd": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "C:\\path\\to\\agent-bridge\\.venv\\Scripts\\python.exe",
+        "args": ["-m", "agent_bridge.hooks", "--agent", "claude"],
+        "timeout": 10
+      }]
+    }]
+  }
+}
+```
+
+Once `agent-bridge-hook` is on your PATH you can use it directly instead of
+the module path. The hook uses only documented fields — `error_type` and
+`error_message` on `StopFailure`, `end_reason` on `SessionEnd`. An
+`error_type` outside the documented set is recorded as `unknown` with the raw
+value in the detail rather than guessed at.
+
+Optionally, chain the same binary in front of your status line with
+`--statusline` to record `rate_limits.*.used_percentage` and capture
+`resets_at` as a real `resume_after`. It prints nothing.
+
+A hook must never break the session it is attached to, so every failure path
+exits 0 after logging.
+
+### Feeding usage from Codex (optional, off by default)
+
+Codex has no official machine-readable usage feed. It does write
+`~/.codex/sessions/**/rollout-*.jsonl`, whose `token_count` events carry a
+`rate_limits` payload. `agent-bridge codex-usage` reads it:
+
+```bash
+agent-bridge codex-usage            # print a sample, change nothing
+agent-bridge codex-usage --apply    # also store it as a usage metric
+```
+
+**Classification: local but undocumented.** No network calls, no credentials,
+no private OpenAI endpoints — only files Codex already wrote to this machine.
+But the format is unpublished and can change without notice, so nothing runs
+it automatically, every parse failure returns nothing, and messaging and
+waiting do not depend on it at all. If a Codex upgrade breaks the format, the
+bridge carries on unchanged.
 
 Results are readable text, not JSON blobs, and always include the ids needed
 for the next call:
@@ -195,6 +336,15 @@ agent-bridge reply msg_01KZG… --from codex --body "on it"
 agent-bridge mark-read msg_01KZG… --agent codex
 agent-bridge agents
 agent-bridge paths
+
+# availability and waiting
+agent-bridge status                 # everything
+agent-bridge status claude          # one agent's availability record
+agent-bridge status codex
+agent-bridge set-status codex usage_exhausted \
+    --reason "5-hour limit" --resume-after 2026-08-08T18:00:00Z
+agent-bridge wait claude --timeout 60      # exit 0 on an event, 3 on timeout
+agent-bridge cancel-wait claude --reason "changed my mind"
 ```
 
 `--from` is allowed here because a person at a terminal already decides who
@@ -216,7 +366,43 @@ they are. The MCP tools never accept it.
 7. **Confirm the thread:** `agent-bridge threads` — one thread, two messages,
    participants `claude, codex`.
 
-If all seven pass, V1 works.
+If all seven pass, messaging works.
+
+## Verifying blocking waits
+
+First, a machine-driven version of the same experiments over real stdio, with
+no chat panel involved:
+
+```bash
+uv run python scripts/wait_experiment.py
+```
+
+It runs a 30-second blocked call woken at 8 s, a 120-second blocked call woken
+at 75 s, and a 20-second call that is allowed to time out, and it asserts the
+wake latency.
+
+Then the GUI versions, which are what actually prove an agent can sit blocked
+in a panel:
+
+1. **Reload first.** After upgrading, run **Developer: Reload Window**, or
+   reconnect `agent-bridge` from the `/mcp` panel. Each client launched its
+   server process at startup and will not have the new tools until it
+   relaunches it.
+2. **30-second blocked call.** In one panel: "Use wait_for_mail with a
+   30-second timeout." It should sit in the tool call, then return `timeout`.
+3. **Woken blocked call.** In panel A: "Wait for mail for 90 seconds." While
+   it is blocked, in panel B: "Send the other agent a message saying the build
+   is green." Panel A should return `message_received` within a second or two
+   and **carry on in the same turn**.
+4. **Peer status.** In panel A: "Wait for mail for 60 seconds." While blocked,
+   run `agent-bridge set-status codex usage_exhausted --reason "test"`. Panel A
+   should return `peer_unavailable`.
+5. **Cancellation.** Start a 120-second wait, then run
+   `agent-bridge cancel-wait <agent>`. It should return `cancelled` promptly.
+
+Watch for two things: the panel should not spin the model while blocked (no
+repeated turns), and the agent should keep working in the same turn after the
+wait returns.
 
 ## Troubleshooting
 
@@ -241,6 +427,14 @@ Both sides must point at the same database. `bridge_status` (or
 `~/.agent-bridge/agent-bridge.log`, rotating at 1 MB. It records connections,
 message ids, senders, recipients, and body *sizes* — never bodies, never
 secrets. Add `--verbose` to a server entry for debug detail.
+
+**A blocked `wait_for_mail` is stuck and I want it back.**
+`agent-bridge cancel-wait claude` wakes it with `cancelled`. Interrupting the
+turn in the panel also cancels the MCP request, which aborts the wait.
+
+**A wait returned but the agent stopped responding inline.**
+The call probably ran past two minutes and Claude Code v2.1.212+ backgrounded
+it. Use a timeout at or under 120 seconds, or check `/tasks`.
 
 **A tool call fails and the message is unhelpful.**
 Every validation failure returns a specific sentence (unknown agent, malformed
@@ -287,12 +481,27 @@ Module layout:
 | `config.py` | Data directory, agent roster, per-process identity |
 | `db.py` | SQLite connections, pragmas, schema migrations |
 | `models.py` | Row-shaped dataclasses |
-| `store.py` | Every message operation; knows nothing about MCP |
+| `store.py` | Every message and status operation; knows nothing about MCP |
+| `events.py` | Blocking waits, wake reasons, the in-process event hub |
 | `formatting.py` | Rendering for tool results and the CLI |
 | `server.py` | MCP tool definitions and the stdio entry point |
 | `cli.py` | The human debug CLI |
 
-Schema (version 1): `agents`, `threads`, `messages`. Ids are prefixed ULIDs
+**How waiting works.** The two agents are separate OS processes, so an
+in-memory event in one server can never reach a waiter in the other. SQLite is
+therefore the authoritative wake-up channel: a waiter re-reads persistent state
+every 200 ms (`AGENT_BRIDGE_POLL_INTERVAL`) and decides from what it finds
+there. The in-process `EventHub` is a latency optimization for waiters that
+share a process with the writer, and correctness never depends on it.
+
+Lost wake-ups are prevented by checking persistent state **before** registering
+with the hub and **again immediately after**. Anything that lands in the gap is
+caught by the second check; anything later either sets the event or is found by
+the next poll. `tests/test_events.py` walks a send across that window at 25
+randomised sub-poll offsets.
+
+Schema (version 2): `agents` (now with reported availability), `threads`,
+`messages`. Ids are prefixed ULIDs
 (`msg_…`, `thr_…`) — sortable by creation time and safe to generate from two
 processes at once. SQLite runs in WAL mode with a 5-second busy timeout, and
 each operation uses its own short-lived connection.
@@ -302,9 +511,14 @@ each operation uses its own short-lived connection.
 Deliberately out of scope for V1, but the schema and module boundaries leave
 room:
 
-- **Automatic delivery.** Push new messages into a running session (Claude Code
-  hooks or channels; whatever Codex ends up supporting). Nothing in the current
-  design forbids a watcher process.
+- **Automatic delivery.** Waking an agent that is *idle*, rather than one that
+  chose to block in `wait_for_mail`. Claude Code hooks or channels; whatever
+  Codex ends up supporting.
+- **Feeding availability automatically.** A `StopFailure` hook mapping
+  `error_type` to `usage_exhausted` / `auth_error`, a status-line reader for
+  `rate_limits.*.resets_at`, and an opt-in reader for Codex's local session
+  rollout files. All researched, none wired up — see
+  [docs/research.md](docs/research.md#detecting-usage-exhaustion-and-client-failure).
 - **Goals and tasks.** `create_goal` / `update_goal`, `create_task` /
   `claim_task` / `complete_task` — new tables, additive migration.
 - **Bounded autonomous collaboration.** Implement → review → fix → re-review

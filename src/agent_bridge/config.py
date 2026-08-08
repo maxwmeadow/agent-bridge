@@ -46,9 +46,80 @@ AGENT_STATUSES: tuple[str, ...] = (
 )
 
 #: Statuses that mean "do not expect progress from this agent right now".
+#:
+#: Note what is absent: nothing about how much quota has been consumed. A
+#: agent at 99% of its window is still perfectly available.
 UNAVAILABLE_STATUSES: frozenset[str] = frozenset(
     {"usage_exhausted", "auth_error", "client_closed", "unresponsive"}
 )
+
+# --- failure vocabulary ----------------------------------------------------
+#: Claude Code's documented ``StopFailure.error_type`` values, verbatim.
+#: Source: https://code.claude.com/docs/en/hooks (StopFailure -> Input).
+CLAUDE_STOP_FAILURE_TYPES: tuple[str, ...] = (
+    "rate_limit",
+    "overloaded",
+    "authentication_failed",
+    "oauth_org_not_allowed",
+    "billing_error",
+    "invalid_request",
+    "model_not_found",
+    "server_error",
+    "max_output_tokens",
+    "unknown",
+)
+
+#: Claude Code's documented ``SessionEnd.end_reason`` values, verbatim.
+CLAUDE_SESSION_END_REASONS: tuple[str, ...] = (
+    "clear",
+    "resume",
+    "logout",
+    "prompt_input_exit",
+    "bypass_permissions_disabled",
+    "other",
+)
+
+#: Failure kinds the bridge stores. The Claude values are kept as-is rather
+#: than folded together, so "we ran out of quota", "the card was declined",
+#: "the login expired" and "Anthropic had a bad minute" stay distinguishable.
+FAILURE_KINDS: tuple[str, ...] = CLAUDE_STOP_FAILURE_TYPES + ("client_error",)
+
+#: How a failure projects onto *availability*. This is a coarsening, which is
+#: exactly why the raw failure kind is stored alongside it.
+#:
+#: Anything absent from this map records the failure without touching
+#: availability: a malformed request or an output-length cap says nothing
+#: about whether the agent can work on the next thing.
+FAILURE_TO_STATUS: dict[str, str] = {
+    "rate_limit": "usage_exhausted",
+    # Distinct failure, same practical consequence: the account cannot spend.
+    "billing_error": "usage_exhausted",
+    "authentication_failed": "auth_error",
+    "oauth_org_not_allowed": "auth_error",
+    # Provider trouble is explicitly NOT usage exhaustion.
+    "overloaded": "unresponsive",
+    "server_error": "unresponsive",
+    "client_error": "unresponsive",
+}
+
+#: Usage windows the bridge understands, per source.
+USAGE_WINDOWS: tuple[str, ...] = ("five_hour", "seven_day", "primary", "secondary")
+
+#: Where a usage sample came from, and how much to trust it.
+USAGE_SOURCES: tuple[str, ...] = (
+    "claude_statusline",  # official Claude Code status line JSON
+    "codex_rollout",  # Codex local session files; undocumented, best effort
+    "manual",  # typed in by a person
+)
+
+
+def require_failure_kind(kind: str) -> str:
+    normalized = kind.strip().lower()
+    if normalized not in FAILURE_KINDS:
+        raise ValidationError(
+            f"Unknown failure kind {kind!r}. Valid kinds: {', '.join(FAILURE_KINDS)}."
+        )
+    return normalized
 
 # --- wait_for_event bounds -------------------------------------------------
 #: Server-side clamp. A caller cannot ask to block forever.

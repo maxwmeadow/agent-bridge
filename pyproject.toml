@@ -11,6 +11,7 @@ dependencies = [
 [project.scripts]
 agent-bridge = "agent_bridge.cli:main"
 agent-bridge-mcp = "agent_bridge.server:main"
+agent-bridge-hook = "agent_bridge.hooks:main"
 
 [build-system]
 requires = ["hatchling"]

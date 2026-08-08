@@ -170,6 +170,28 @@ def format_agent_status(status: AgentStatus) -> str:
     if status.status_reason:
         lines.append(f"  reason:        {status.status_reason}")
 
+    # Failure and usage are reported separately from availability on purpose.
+    if status.last_failure_kind:
+        lines.append(
+            f"  last failure:  {status.last_failure_kind}"
+            + (f" at {short_time(status.last_failure_at)}" if status.last_failure_at else "")
+        )
+        if status.last_failure_detail:
+            lines.append(f"                 {status.last_failure_detail}")
+
+    if status.usage is not None:
+        usage = status.usage
+        line = f"  usage:         {usage.percent:.0f}% of {usage.window}"
+        if usage.resets_at:
+            line += f", resets {short_time(usage.resets_at)}"
+        lines.append(line)
+        trust = "official" if usage.is_official_source else "best-effort, undocumented format"
+        lines.append(
+            f"                 source {usage.source} ({trust}), "
+            f"sampled {short_time(usage.sampled_at)}"
+        )
+        lines.append("                 usage is a metric, not an availability signal")
+
     idle = status.seconds_since_seen()
     if idle is not None and idle > 900:
         # Observed, and labelled as observed. Silence is never converted into
