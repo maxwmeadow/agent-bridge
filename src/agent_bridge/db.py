@@ -15,7 +15,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -110,6 +110,13 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         # Held while an agent is blocked inside wait_for_event. Self-expiring,
         # so a crashed waiter cannot suppress wakes forever.
         "ALTER TABLE agents ADD COLUMN wait_lease_until TEXT",
+    ),
+    5: (
+        # Claude Code delivers an asyncRewake through the same path as a typed
+        # prompt, so UserPromptSubmit fires for our own injection. Without a
+        # timestamp to compare against, every automatic wake would reset the
+        # consecutive-wake budget and the loop brake would never engage.
+        "ALTER TABLE client_sessions ADD COLUMN last_auto_wake_at TEXT",
     ),
 }
 

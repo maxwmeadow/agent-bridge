@@ -413,11 +413,24 @@ def test_circuit_breaker_stops_endless_auto_wakes(db_path: Path) -> None:
 
 
 def test_user_prompt_resets_the_circuit_breaker(db_path: Path) -> None:
+    """A human stepping in clears the budget, so collaboration can resume."""
+    from datetime import datetime, timedelta, timezone
+
     store = MessageStore(db_path)
     registry = SessionRegistry(db_path)
     registry.register(session_id="sess-1", agent="claude", client_type="claude_code")
     for _ in range(MAX_CONSECUTIVE_AUTO_WAKES):
         registry.record_auto_wake("sess-1")
+
+    # Backdate so this reads as a person typing, not the echo of our own wake.
+    long_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(
+        timespec="microseconds"
+    )
+    with db.session(db_path) as conn, conn:
+        conn.execute(
+            "UPDATE client_sessions SET last_auto_wake_at = ? WHERE id = ?",
+            (long_ago, "sess-1"),
+        )
 
     hooks.handle_user_prompt_submit(
         HookContext(
@@ -544,3 +557,60 @@ def test_session_metadata_round_trips(registry: SessionRegistry, db_path: Path) 
         ).fetchone()
     assert json.loads(row[0]) == {"note": "primary window"}
     assert registry.get("sess-1").metadata == {"note": "primary window"}
+
+
+def test_injected_wake_does_not_reset_its_own_circuit_breaker(db_path: Path) -> None:
+    """The bug live testing caught.
+
+    Claude Code delivers an asyncRewake through the same path as a typed
+    prompt, so UserPromptSubmit fires ~100ms after the doorbell rings. If that
+    reset the budget, the breaker could never engage and two agents could
+    acknowledge each other forever.
+    """
+    store = MessageStore(db_path)
+    registry = SessionRegistry(db_path)
+    registry.register(session_id="sess-1", agent="claude", client_type="claude_code")
+    store.send(sender="codex", recipient="claude", subject="s", body="b")
+
+    assert run_doorbell(db_path) == REWAKE_EXIT_CODE
+    assert registry.get("sess-1").auto_wakes == 1
+
+    # The echo of our own wake arrives immediately afterwards.
+    hooks.handle_user_prompt_submit(
+        HookContext(
+            store=store,
+            registry=registry,
+            agent="claude",
+            payload={"hook_event_name": "UserPromptSubmit", "session_id": "sess-1"},
+        )
+    )
+    assert registry.get("sess-1").auto_wakes == 1  # NOT reset
+
+
+def test_a_real_human_prompt_still_resets_the_breaker(db_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    store = MessageStore(db_path)
+    registry = SessionRegistry(db_path)
+    registry.register(session_id="sess-1", agent="claude", client_type="claude_code")
+    registry.record_auto_wake("sess-1")
+
+    # Backdate the wake so the next prompt is unambiguously a person.
+    long_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(
+        timespec="microseconds"
+    )
+    with db.session(db_path) as conn, conn:
+        conn.execute(
+            "UPDATE client_sessions SET last_auto_wake_at = ? WHERE id = ?",
+            (long_ago, "sess-1"),
+        )
+
+    hooks.handle_user_prompt_submit(
+        HookContext(
+            store=store,
+            registry=registry,
+            agent="claude",
+            payload={"hook_event_name": "UserPromptSubmit", "session_id": "sess-1"},
+        )
+    )
+    assert registry.get("sess-1").auto_wakes == 0

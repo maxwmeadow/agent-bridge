@@ -25,6 +25,7 @@ from pydantic import Field
 from . import __version__
 from .config import (
     AGENT_ENV,
+    MESSAGE_INTENTS,
     AGENT_STATUSES,
     DEFAULT_WAIT_SECONDS,
     MAX_WAIT_SECONDS,
@@ -65,6 +66,19 @@ _CONTEXT_DESCRIPTION = (
     + ", ".join(sorted(CONTEXT_KEYS))
     + ". Supply values you already know; the bridge does not inspect your repository."
 )
+
+IntentArg = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Optional. What this message is for: "
+            + ", ".join(MESSAGE_INTENTS)
+            + ". Intents that continue an exchange wake the peer if it is idle; "
+            "info, decision and review_result do not. Use info to acknowledge "
+            "something without pulling the other agent back in."
+        )
+    ),
+]
 
 ContextArg = Annotated[
     dict[str, str] | None,
@@ -132,10 +146,12 @@ def build_server(
             ),
         ],
         context: ContextArg = None,
+        intent: IntentArg = None,
     ) -> str:
         with _tool_errors("send_message"):
             message = store.send(
-                sender=me, recipient=to, subject=subject, body=body, context=context
+                sender=me, recipient=to, subject=subject, body=body,
+                context=context, intent=intent,
             )
             hub.notify(message.recipient)
             return format_sent(message)
@@ -193,9 +209,12 @@ def build_server(
         message_id: Annotated[str, Field(description="Id of the message you are replying to.")],
         body: Annotated[str, Field(description="Your reply.")],
         context: ContextArg = None,
+        intent: IntentArg = None,
     ) -> str:
         with _tool_errors("reply"):
-            message = store.reply(sender=me, message_id=message_id, body=body, context=context)
+            message = store.reply(
+                sender=me, message_id=message_id, body=body, context=context, intent=intent
+            )
             hub.notify(message.recipient)
             return format_sent(message)
 

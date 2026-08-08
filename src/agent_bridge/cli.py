@@ -21,6 +21,7 @@ from .config import (
     DEFAULT_WAIT_SECONDS,
     FAILURE_KINDS,
     MAX_WAIT_SECONDS,
+    MESSAGE_INTENTS,
     USAGE_WINDOWS,
     WAKE_METHODS,
     database_path,
@@ -172,11 +173,19 @@ def build_parser() -> argparse.ArgumentParser:
     body_group = send.add_mutually_exclusive_group(required=True)
     body_group.add_argument("--body")
     body_group.add_argument("--body-file", type=Path, help="Read the body from a file ('-' for stdin).")
+    send.add_argument("--intent", choices=MESSAGE_INTENTS, default=None)
+    send.add_argument(
+        "--no-wake", action="store_true", help="Deliver without ringing the peer's doorbell."
+    )
 
     reply = sub.add_parser("reply", help="Reply to a message, keeping its thread.")
     reply.add_argument("message_id")
     reply.add_argument("--from", dest="sender", required=True)
     reply.add_argument("--body", required=True)
+    reply.add_argument("--intent", choices=MESSAGE_INTENTS, default=None)
+    reply.add_argument(
+        "--no-wake", action="store_true", help="Deliver without ringing the peer's doorbell."
+    )
 
     mark = sub.add_parser("mark-read", help="Mark a message read.")
     mark.add_argument("message_id")
@@ -397,12 +406,20 @@ def run(args: argparse.Namespace) -> int:
             recipient=args.recipient,
             subject=args.subject,
             body=_read_body(args),
+            intent=args.intent,
+            requires_response=False if args.no_wake else None,
         )
         print(f"Sent {message.id} to {message.recipient} in thread {message.thread_id}.")
         return 0
 
     if args.command == "reply":
-        message = store.reply(sender=args.sender, message_id=args.message_id, body=args.body)
+        message = store.reply(
+            sender=args.sender,
+            message_id=args.message_id,
+            body=args.body,
+            intent=args.intent,
+            requires_response=False if args.no_wake else None,
+        )
         print(f"Sent {message.id} to {message.recipient} in thread {message.thread_id}.")
         return 0
 

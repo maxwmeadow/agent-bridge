@@ -52,6 +52,7 @@ class ClientSession:
     wake_method: str
     wake_generation: int
     auto_wakes: int
+    last_auto_wake_at: str | None
     metadata: dict[str, str]
 
     @property
@@ -79,6 +80,7 @@ class ClientSession:
             wake_method=row["wake_method"],
             wake_generation=int(row["wake_generation"]),
             auto_wakes=int(row["auto_wakes"]),
+            last_auto_wake_at=row["last_auto_wake_at"],
             metadata=json.loads(raw) if raw else {},
         )
 
@@ -227,10 +229,13 @@ class SessionRegistry:
             conn.execute(
                 """
                 UPDATE client_sessions
-                SET auto_wakes = auto_wakes + 1, last_seen_at = ?, state = 'active'
+                SET auto_wakes = auto_wakes + 1,
+                    last_seen_at = ?,
+                    last_auto_wake_at = ?,
+                    state = 'active'
                 WHERE id = ?
                 """,
-                (utc_now(), session_id),
+                (utc_now(), utc_now(), session_id),
             )
             row = conn.execute(
                 "SELECT auto_wakes FROM client_sessions WHERE id = ?", (session_id,)

@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import (
+    AUTO_WAKE_ECHO_SECONDS,
     CLAUDE_SESSION_END_REASONS,
     CLAUDE_STOP_FAILURE_TYPES,
     DOORBELL_SECONDS,
@@ -130,15 +131,44 @@ def handle_session_start(ctx: HookContext) -> int:
 
 
 def handle_user_prompt_submit(ctx: HookContext) -> int:
-    """A human typed something: the session is active and the budget resets.
+    """A prompt was submitted. Reset the wake budget only if a human sent it.
 
-    This is the circuit breaker's reset. Consecutive automatic wakes only
-    accumulate while no person is involved.
+    Verified live: Claude Code delivers an ``asyncRewake`` through the same
+    path as a typed prompt, so this hook fires for the bridge's own injection
+    (measured 113 ms after the doorbell rang). Resetting on that would let the
+    circuit breaker be cleared by the very loop it exists to stop, so a prompt
+    arriving within :data:`AUTO_WAKE_ECHO_SECONDS` of an automatic wake is
+    treated as the echo of that wake, not as human input.
     """
     session_id = _ensure_session(ctx, "claude_code", "anthropic")
-    if session_id is not None:
-        ctx.registry.touch(session_id, state="active", reset_auto_wakes=True)
+    if session_id is None:
+        return 0
+
+    session = ctx.registry.get(session_id)
+    if _is_auto_wake_echo(session.last_auto_wake_at):
+        log.info(
+            "prompt within %.0fs of an automatic wake session=%s; "
+            "treating as our own injection, wake budget stays at %d",
+            AUTO_WAKE_ECHO_SECONDS,
+            session_id,
+            session.auto_wakes,
+        )
+        ctx.registry.touch(session_id, state="active")
+        return 0
+
+    ctx.registry.touch(session_id, state="active", reset_auto_wakes=True)
+    log.info("human prompt session=%s; automatic wake budget reset", session_id)
     return 0
+
+
+def _is_auto_wake_echo(last_auto_wake_at: str | None) -> bool:
+    if last_auto_wake_at is None:
+        return False
+    try:
+        when = datetime.fromisoformat(last_auto_wake_at)
+    except ValueError:  # pragma: no cover - written by us, always ISO
+        return False
+    return (datetime.now(timezone.utc) - when).total_seconds() < AUTO_WAKE_ECHO_SECONDS
 
 
 def handle_stop(ctx: HookContext) -> int:

@@ -210,6 +210,11 @@ NON_WAKING_INTENTS: frozenset[str] = frozenset({"info", "decision", "review_resu
 #: that stops two agents from politely acknowledging each other forever.
 MAX_CONSECUTIVE_AUTO_WAKES = 6
 
+#: A UserPromptSubmit arriving within this long after an automatic wake is
+#: our own injection coming back around, not a person typing. Verified live:
+#: the gap was 113 ms.
+AUTO_WAKE_ECHO_SECONDS = 10.0
+
 #: How long the Stop-hook doorbell stays armed after a turn ends. Kept just
 #: inside Claude Code's 600s default command-hook timeout so the waiter
 #: retires on its own terms rather than being killed mid-claim.
