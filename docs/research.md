@@ -169,10 +169,29 @@ The >2-minute result confirms the documented boundary: backgrounding arrives
 in v2.1.212, so this inline behaviour will change on upgrade. Keep production
 waits at or under 120 s.
 
-Not yet verified: the same experiments inside the **Codex** panel, and whether
-`StopFailure` actually fires end-to-end (it needs a genuine API error, which
-cannot be manufactured on demand — the handler itself is unit-tested and was
-pipe-tested with real payloads).
+### Codex panel
+
+Run 2026-08-08 in the Codex VS Code panel (`openai.chatgpt` extension,
+codex-cli 0.147.0-alpha.6.5).
+
+| Experiment | Result | Status |
+| --- | --- | --- |
+| 30 s wait, nothing sent | Blocked for the full 30 s, returned `timeout` | Verified (GUI) |
+| 150 s wait, peer sends mid-wait | Returned `message_received` after **15.4 s**, then read the message and replied **in the same turn** — total turn 43 s, no re-prompt | Verified (GUI) |
+| Blocked call spinning the model | Did not happen | Verified (GUI) |
+
+Confirmed from the other side: the reply landed 11 s after the send, in the
+same thread, with the wake itself sub-second.
+
+**Conclusion: a Codex MCP client tolerates a blocked stdio tool call and
+resumes work inline when it returns.** That is the premise of this release,
+now verified on both clients.
+
+Still unverified: Codex behaviour past the two-minute mark (no documented
+backgrounding equivalent is known either way), and whether `StopFailure`
+fires end-to-end — it needs a genuine API error, which cannot be manufactured
+on demand. The handler is unit-tested and was pipe-tested with real
+documented payloads.
 
 ---
 
