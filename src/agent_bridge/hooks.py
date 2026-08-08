@@ -41,10 +41,15 @@ from typing import Any
 
 from .config import (
     AUTO_WAKE_ECHO_SECONDS,
+    configured_client_type,
+    configured_provider,
     CLAUDE_SESSION_END_REASONS,
     CLAUDE_STOP_FAILURE_TYPES,
+    CLIENT_TYPE_ENV,
+    DEFAULT_CLIENT_TYPE,
     DOORBELL_SECONDS,
     MAX_CONSECUTIVE_AUTO_WAKES,
+    PROVIDER_ENV,
     ServerConfig,
     database_path,
     log_path,
@@ -77,6 +82,8 @@ class HookContext:
     registry: SessionRegistry
     agent: str
     payload: dict[str, Any]
+    client_type: str = DEFAULT_CLIENT_TYPE
+    provider: str | None = None
 
     @property
     def session_id(self) -> str | None:
@@ -89,7 +96,7 @@ class HookContext:
         return value if isinstance(value, str) and value.strip() else None
 
 
-def _ensure_session(ctx: HookContext, client_type: str, provider: str | None) -> str | None:
+def _ensure_session(ctx: HookContext) -> str | None:
     """Register the session if this is the first hook that mentions it.
 
     Hooks can be added mid-session, so the doorbell cannot assume SessionStart
@@ -104,8 +111,8 @@ def _ensure_session(ctx: HookContext, client_type: str, provider: str | None) ->
         ctx.registry.register(
             session_id=session_id,
             agent=ctx.agent,
-            client_type=client_type,
-            provider=provider,
+            client_type=ctx.client_type,
+            provider=ctx.provider,
             project=ctx.cwd,
         )
     return session_id
@@ -122,8 +129,8 @@ def handle_session_start(ctx: HookContext) -> int:
     ctx.registry.register(
         session_id=session_id,
         agent=ctx.agent,
-        client_type="claude_code",
-        provider="anthropic",
+        client_type=ctx.client_type,
+        provider=ctx.provider,
         project=ctx.cwd,
     )
     ctx.registry.prune()
@@ -140,7 +147,7 @@ def handle_user_prompt_submit(ctx: HookContext) -> int:
     arriving within :data:`AUTO_WAKE_ECHO_SECONDS` of an automatic wake is
     treated as the echo of that wake, not as human input.
     """
-    session_id = _ensure_session(ctx, "claude_code", "anthropic")
+    session_id = _ensure_session(ctx)
     if session_id is None:
         return 0
 
@@ -173,7 +180,7 @@ def _is_auto_wake_echo(last_auto_wake_at: str | None) -> bool:
 
 def handle_stop(ctx: HookContext) -> int:
     """The doorbell. Returns :data:`REWAKE_EXIT_CODE` to start a new turn."""
-    session_id = _ensure_session(ctx, "claude_code", "anthropic")
+    session_id = _ensure_session(ctx)
     if session_id is None:
         log.warning("Stop with no session_id; cannot arm the doorbell")
         return 0
@@ -355,6 +362,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Treat stdin as status line JSON and record rate_limits as a usage sample.",
     )
     parser.add_argument(
+        "--client-type",
+        default=None,
+        help=f"Client hosting this session. Defaults to ${CLIENT_TYPE_ENV} or claude_code.",
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help=f"Model provider behind this session. Defaults to ${PROVIDER_ENV}. Informational.",
+    )
+    parser.add_argument(
         "--doorbell-seconds",
         type=int,
         default=None,
@@ -389,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
             registry=SessionRegistry(database_path()),
             agent=config.agent,
             payload=payload,
+            client_type=configured_client_type(args.client_type),
+            provider=configured_provider(args.provider),
         )
 
         if args.statusline:

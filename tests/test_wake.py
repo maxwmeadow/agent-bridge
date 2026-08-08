@@ -614,3 +614,119 @@ def test_a_real_human_prompt_still_resets_the_breaker(db_path: Path) -> None:
         )
     )
     assert registry.get("sess-1").auto_wakes == 0
+
+
+# ------------------------------------------------- shared config, per-profile identity
+
+
+def test_identity_resolution_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--agent beats the environment; the environment beats nothing at all."""
+    from agent_bridge.config import ServerConfig
+    from agent_bridge.errors import ValidationError
+
+    monkeypatch.setenv("AGENT_BRIDGE_AGENT", "codex")
+    assert ServerConfig.resolve(None).agent == "codex"
+    assert ServerConfig.resolve("claude").agent == "claude"
+
+    monkeypatch.delenv("AGENT_BRIDGE_AGENT")
+    with pytest.raises(ValidationError) as excinfo:
+        ServerConfig.resolve(None)
+    # The message has to be actionable inside VS Code, where this bites.
+    assert "AGENT_BRIDGE_AGENT" in str(excinfo.value)
+    assert "profile" in str(excinfo.value)
+
+
+def test_two_claude_code_profiles_get_separate_identities(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One shared hook command, two windows, two identities.
+
+    This is the whole point of env-supplied identity: the same configuration
+    is registered once, and each VS Code profile decides who it is.
+    """
+    store = MessageStore(db_path)
+    registry = SessionRegistry(db_path)
+
+    def session_start(agent: str, session_id: str, provider: str) -> None:
+        monkeypatch.setenv("AGENT_BRIDGE_AGENT", agent)
+        monkeypatch.setenv("AGENT_BRIDGE_PROVIDER", provider)
+        from agent_bridge.config import (
+            ServerConfig,
+            configured_client_type,
+            configured_provider,
+        )
+
+        config = ServerConfig.resolve(None)
+        hooks.handle_session_start(
+            HookContext(
+                store=store,
+                registry=registry,
+                agent=config.agent,
+                payload={"session_id": session_id, "cwd": "C:/repos/app"},
+                client_type=configured_client_type(),
+                provider=configured_provider(),
+            )
+        )
+
+    session_start("claude", "opus-window", "anthropic")
+    session_start("codex", "gpt-window", "openai")
+
+    opus = registry.get("opus-window")
+    gpt = registry.get("gpt-window")
+    assert (opus.agent, opus.provider) == ("claude", "anthropic")
+    assert (gpt.agent, gpt.provider) == ("codex", "openai")
+    # Both are Claude Code sessions, so both are wakeable the same way.
+    assert opus.client_type == gpt.client_type == "claude_code"
+    assert opus.wake_method == gpt.wake_method == "stop_hook_rewake"
+
+    # Each wakes its own window, despite sharing a project.
+    claude_target = registry.select_target("claude", project="C:/repos/app")
+    codex_target = registry.select_target("codex", project="C:/repos/app")
+    assert claude_target is not None and claude_target.id == "opus-window"
+    assert codex_target is not None and codex_target.id == "gpt-window"
+
+
+def test_gpt_backed_codex_session_can_be_woken(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """codex running inside Claude Code gains idle wake, unlike the Codex GUI."""
+    monkeypatch.setenv("AGENT_BRIDGE_AGENT", "codex")
+    store = MessageStore(db_path)
+    registry = SessionRegistry(db_path)
+    registry.register(
+        session_id="gpt-window",
+        agent="codex",
+        client_type="claude_code",
+        provider="openai",
+    )
+    store.send(sender="claude", recipient="codex", subject="please implement", body="b")
+
+    assert run_doorbell(db_path, session_id="gpt-window", agent="codex") == REWAKE_EXIT_CODE
+
+
+def test_a_real_codex_gui_session_is_still_never_targeted(db_path: Path) -> None:
+    """Two codex sessions, only the wakeable one is chosen."""
+    registry = SessionRegistry(db_path)
+    registry.register(
+        session_id="codex-gui", agent="codex", client_type="codex", wake_method="none"
+    )
+    time.sleep(0.01)
+    registry.register(
+        session_id="gpt-window",
+        agent="codex",
+        client_type="claude_code",
+        provider="openai",
+    )
+    chosen = registry.select_target("codex")
+    assert chosen is not None and chosen.id == "gpt-window"
+
+
+def test_provider_is_not_inferred_from_the_agent_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bridge cares about session mechanics, not which vendor is behind it."""
+    from agent_bridge.config import configured_provider
+
+    monkeypatch.delenv("AGENT_BRIDGE_PROVIDER", raising=False)
+    assert configured_provider() is None
+    monkeypatch.setenv("AGENT_BRIDGE_PROVIDER", "openai")
+    assert configured_provider() == "openai"
+    assert configured_provider("anthropic") == "anthropic"  # explicit flag wins

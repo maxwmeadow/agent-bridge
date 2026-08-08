@@ -17,19 +17,21 @@ own subscription logins. agent-bridge is a small MCP server they both call.
               ┌───────────────┴───────────────┐
               │                               │
    agent-bridge-mcp                  agent-bridge-mcp
-     --agent claude                    --agent codex
+   AGENT_BRIDGE_AGENT                AGENT_BRIDGE_AGENT
+       = claude                          = codex
         (stdio)                           (stdio)
               │                               │
-        Claude Code                        Codex
-      VS Code panel                    VS Code panel
+     Claude Code window              Claude Code window
+       or Codex panel                  or Codex panel
    subscription login               subscription login
               │                               │
               └──────────  Git repo  ─────────┘
 ```
 
-Two processes, one database. Each process's identity is fixed by its
-`--agent` flag, so no tool ever exposes a `from` parameter and neither model
-can send mail as the other.
+Two processes, one database. Each process's identity is fixed when it starts,
+from its environment or an explicit flag, so no tool ever exposes a `from`
+parameter and neither model can send mail as the other. The same registration
+serves every window; only the environment differs.
 
 ## What it does
 
@@ -93,14 +95,18 @@ the VS Code extension does not put it on your PATH):
 
 ```bash
 claude mcp add --scope user --transport stdio agent-bridge \
-  -- "$HOME/.local/bin/agent-bridge-mcp" --agent claude
+  -- "$HOME/.local/bin/agent-bridge-mcp"
 ```
 
 On Windows, use the full path to the `.exe`:
 
 ```powershell
-claude mcp add --scope user --transport stdio agent-bridge -- "C:\Users\<you>\.local\bin\agent-bridge-mcp.exe" --agent claude
+claude mcp add --scope user --transport stdio agent-bridge -- "C:\Users\<you>\.local\bin\agent-bridge-mcp.exe"
 ```
+
+No `--agent` here: identity comes from `AGENT_BRIDGE_AGENT`, so one
+registration serves every Claude Code window. Set that variable per VS Code
+profile - see [One config, many windows](#one-config-many-windows).
 
 `--scope user` makes it available in every project. Verify:
 
@@ -135,8 +141,10 @@ command = 'C:\Users\<you>\.local\bin\agent-bridge-mcp.exe'
 args = ["--agent", "codex"]
 ```
 
-**Note the different `--agent` value in each client.** That flag is the whole
-identity model. Getting it wrong is the one setup mistake that matters.
+**Each client must have a different identity.** That is the whole identity
+model, and getting it wrong is the one setup mistake that matters. Supply it
+with `--agent`, or leave the flag off and set `AGENT_BRIDGE_AGENT` per client
+— see [One config, many windows](#one-config-many-windows).
 
 ## VS Code GUI usage
 
@@ -219,6 +227,49 @@ Any status may follow any other. No transition graph is enforced: a client can
 die in any state, and rejecting a "wrong" transition would only preserve a
 staler record than the one being rejected.
 
+## One config, many windows
+
+Identity resolves in this order, with no default:
+
+1. an explicit `--agent` argument;
+2. the `AGENT_BRIDGE_AGENT` environment variable;
+3. **failure** — a clear error, never a guess.
+
+There is no fallback on purpose. Two Claude Code windows can run the identical
+command, so guessing would silently let one send mail as the other, which is
+the single failure this design exists to prevent.
+
+Because identity comes from the environment, **one MCP registration and one
+hook block serve every window**. Register them without `--agent`:
+
+```bash
+claude mcp add --scope user --transport stdio agent-bridge -- "…\agent-bridge-mcp.exe"
+```
+
+Then set the variable per VS Code profile, under
+**Extensions → Claude Code → Environment Variables**
+(`claudeCode.environmentVariables`):
+
+| Profile | Setting |
+| --- | --- |
+| Your normal profile | `AGENT_BRIDGE_AGENT=claude` |
+| A second profile | `AGENT_BRIDGE_AGENT=codex` |
+
+Claude Code passes its environment to the MCP server and the hooks it spawns,
+so both pick the identity up automatically.
+
+Two optional variables record what a session is, without changing behaviour:
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `AGENT_BRIDGE_CLIENT_TYPE` | Which client hosts the session | `claude_code` |
+| `AGENT_BRIDGE_PROVIDER` | Which model is behind it (`anthropic`, `openai`, …) | unset |
+
+The provider is **never inferred from the agent id**. An agent called `codex`
+running inside Claude Code through a proxy is still a Claude Code session, and
+it gets Claude Code's wake mechanism — the bridge cares about session
+mechanics, not which vendor is behind the model.
+
 ## Automatic wake-up
 
 A message sent to an **idle** Claude Code session starts a new turn there by
@@ -254,7 +305,7 @@ authority.
 ### Setup
 
 ```bash
-claude mcp add --scope user --transport stdio agent-bridge -- "…\agent-bridge-mcp.exe" --agent claude
+claude mcp add --scope user --transport stdio agent-bridge -- "…\agent-bridge-mcp.exe"
 ```
 
 Then add to `~/.claude/settings.json` (keeping any hooks you already have):
@@ -262,17 +313,20 @@ Then add to `~/.claude/settings.json` (keeping any hooks you already have):
 ```json
 {
   "hooks": {
-    "SessionStart":     [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 10}]}],
-    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 10}]}],
-    "Stop":             [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 600, "async": true, "asyncRewake": true}]}],
-    "StopFailure":      [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 10}]}],
-    "SessionEnd":       [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "args": ["--agent", "claude"], "timeout": 10}]}]
+    "SessionStart":     [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 10}]}],
+    "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 10}]}],
+    "Stop":             [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 600, "async": true, "asyncRewake": true}]}],
+    "StopFailure":      [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 10}]}],
+    "SessionEnd":       [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 10}]}]
   }
 }
 ```
 
 `async` + `asyncRewake` on `Stop` is what makes idle wake work. The others are
 bookkeeping: session registration, activity, failure, and shutdown.
+
+No `--agent` anywhere: every window shares this block and takes its identity
+from `AGENT_BRIDGE_AGENT`. See [One config, many windows](#one-config-many-windows).
 
 ### Which session gets woken
 
@@ -343,35 +397,12 @@ bucket, and only project onto availability through a documented map:
 stdin. **No model turn, no tokens, no cost** — the peer blocked in
 `wait_for_event` learns about a rate limit on its next poll.
 
-Register it in `~/.claude/settings.json`:
+Register it with the other lifecycle hooks in `~/.claude/settings.json` — see
+the single hook block under [Setup](#setup). The same block covers session
+registration, the idle-wake doorbell, failures, and shutdown, and carries no
+`--agent`, so every profile shares it.
 
-```json
-{
-  "hooks": {
-    "StopFailure": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "C:\\path\\to\\agent-bridge\\.venv\\Scripts\\python.exe",
-        "args": ["-m", "agent_bridge.hooks", "--agent", "claude"],
-        "timeout": 10
-      }]
-    }],
-    "SessionEnd": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "C:\\path\\to\\agent-bridge\\.venv\\Scripts\\python.exe",
-        "args": ["-m", "agent_bridge.hooks", "--agent", "claude"],
-        "timeout": 10
-      }]
-    }]
-  }
-}
-```
-
-Once `agent-bridge-hook` is on your PATH you can use it directly instead of
-the module path. The hook uses only documented fields — `error_type` and
+The hook uses only documented fields — `error_type` and
 `error_message` on `StopFailure`, `end_reason` on `SessionEnd`. An
 `error_type` outside the documented set is recorded as `unknown` with the raw
 value in the detail rather than guessed at.
@@ -501,13 +532,19 @@ wait returns.
 ## Troubleshooting
 
 **A client shows the server as failed.**
-Run the exact configured command yourself: `agent-bridge-mcp --agent claude`.
+Run the exact configured command yourself, with the same environment:
+`AGENT_BRIDGE_AGENT=claude agent-bridge-mcp`.
 It should sit there silently waiting on stdin. Any error prints to stderr.
 Ctrl-C to exit.
 
 **Claude sees its own messages, or an agent looks like the wrong one.**
-Its `--agent` flag is wrong. Check `claude mcp list` and `codex mcp list`; the
-two entries must use different values.
+Its identity is wrong. Run `agent-bridge sessions` and check the `agent` line
+for each window, then check `AGENT_BRIDGE_AGENT` in that profile's
+`claudeCode.environmentVariables`. Two windows must never share a value.
+
+**"No agent identity configured."**
+That profile has no `AGENT_BRIDGE_AGENT` set. This is deliberate: the bridge
+refuses to guess rather than risk two windows sharing one identity.
 
 **"Unknown agent 'x'."**
 Only `claude` and `codex` exist by default. Add more by setting
@@ -539,8 +576,9 @@ traceback rather than swallowed.
 
 - **Local only.** stdio transport; no listener, no port, no remote endpoint.
 - **No credentials.** No API keys, no tokens, no telemetry, no uploads.
-- **Fixed identity.** Sender comes from the process's `--agent` flag, decided
-  by your config file, not by the model.
+- **Fixed identity.** Sender is set when the process starts, from your config
+  or environment, never by the model. There is no default, so a misconfigured
+  window fails loudly instead of impersonating the other agent.
 - **Scoped access.** An agent can only read messages and threads it takes part
   in, and can only mark read what was addressed to it.
 - **Messages are data.** The bridge never executes message content, never

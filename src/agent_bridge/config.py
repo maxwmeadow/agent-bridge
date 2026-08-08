@@ -18,6 +18,36 @@ HOME_ENV = "AGENT_BRIDGE_HOME"
 AGENT_ENV = "AGENT_BRIDGE_AGENT"
 #: Environment variable extending the agent roster, comma separated.
 AGENTS_ENV = "AGENT_BRIDGE_AGENTS"
+#: Which client program this process runs inside. Two Claude Code windows can
+#: host different models, so this is about session mechanics, not the vendor.
+CLIENT_TYPE_ENV = "AGENT_BRIDGE_CLIENT_TYPE"
+#: Which model provider is behind this session. Informational only -- nothing
+#: in the bridge branches on it.
+PROVIDER_ENV = "AGENT_BRIDGE_PROVIDER"
+
+DEFAULT_CLIENT_TYPE = "claude_code"
+
+
+def configured_client_type(override: str | None = None) -> str:
+    """Which client hosts this session.
+
+    Defaults to ``claude_code`` because that is what runs the hooks: a process
+    only reaches this code because a Claude Code hook invoked it.
+    """
+    value = override or os.environ.get(CLIENT_TYPE_ENV)
+    return value.strip().lower() if value and value.strip() else DEFAULT_CLIENT_TYPE
+
+
+def configured_provider(override: str | None = None) -> str | None:
+    """Which model provider is behind this session, if stated.
+
+    Deliberately not inferred from the agent id. ``codex`` running inside a
+    Claude Code window through a proxy is still a Claude Code session, and
+    guessing "codex means openai" would bake a vendor assumption into
+    something that is really about session mechanics.
+    """
+    value = override or os.environ.get(PROVIDER_ENV)
+    return value.strip().lower() if value and value.strip() else None
 
 DEFAULT_AGENTS: tuple[str, ...] = ("claude", "codex")
 
@@ -296,16 +326,25 @@ class ServerConfig:
 
     @staticmethod
     def resolve(agent: str | None) -> "ServerConfig":
-        """Resolve identity from the ``--agent`` flag or ``AGENT_BRIDGE_AGENT``.
+        """Resolve identity, in order: ``--agent``, then ``AGENT_BRIDGE_AGENT``.
 
         Identity is fixed when the process starts. Tools never accept a sender
         argument, so a model cannot impersonate the other agent.
+
+        There is deliberately no default. Two Claude Code windows can run the
+        same command with different identities, so guessing would silently
+        make one of them send mail as the other -- the one failure this design
+        exists to prevent. Missing identity is an error, loudly.
         """
         candidate = agent or os.environ.get(AGENT_ENV)
         if not candidate:
             raise ValidationError(
-                "No agent identity configured. Pass --agent claude (or codex), "
-                f"or set {AGENT_ENV}."
+                f"No agent identity configured. Set {AGENT_ENV} for this client "
+                f"(for example {AGENT_ENV}=claude or {AGENT_ENV}=codex), or pass "
+                "--agent. In VS Code, set it per profile under "
+                "Extensions -> Claude Code -> Environment Variables "
+                f"(claudeCode.environmentVariables), so each window carries its "
+                "own identity and one MCP and hook configuration can be shared."
             )
         return ServerConfig(
             agent=require_known_agent(candidate),
