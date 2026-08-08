@@ -66,6 +66,11 @@ log = logging.getLogger(__name__)
 #: Exit code that makes an ``asyncRewake`` hook wake the model.
 REWAKE_EXIT_CODE = 2
 
+#: How long a non-target doorbell defers to the selected window before
+#: delivering anyway. Prevents mail being stranded when the chosen window has
+#: no armed doorbell -- a wrong window is far better than no window.
+TARGET_YIELD_SECONDS = 30
+
 #: SessionEnd reasons that mean something for availability. The rest are
 #: ordinary session churn (``clear``, ``resume``).
 SESSION_END_TO_STATUS: dict[str, str] = {
@@ -189,6 +194,7 @@ def handle_stop(ctx: HookContext) -> int:
     generation = ctx.registry.next_wake_generation(session_id)
     interval = max(poll_interval(), 0.5)
     deadline = time.monotonic() + DOORBELL_SECONDS
+    yield_until = time.monotonic() + TARGET_YIELD_SECONDS
     log.info(
         "doorbell armed session=%s agent=%s generation=%d for %ds",
         session_id,
@@ -217,6 +223,32 @@ def handle_stop(ctx: HookContext) -> int:
 
         pending = ctx.store.pending_wake_messages(ctx.agent)
         if pending:
+            # Pending mail is per agent, but several windows of the same agent
+            # can be armed at once. Without this check whichever doorbell
+            # polled first would claim the mail, ignoring the targeting rules
+            # entirely and waking an arbitrary window.
+            first = pending[0]
+            wanted = first.context.get("working_directory") or first.context.get("project")
+            target = ctx.registry.select_target(ctx.agent, project=wanted)
+            if target is not None and target.id != session_id:
+                if time.monotonic() < yield_until:
+                    log.info(
+                        "doorbell yielding session=%s; %s is the selected target",
+                        session_id,
+                        target.id,
+                    )
+                    time.sleep(interval)
+                    continue
+                # The chosen window never took it -- its doorbell may not be
+                # armed at all. Deliver here rather than strand the mail.
+                log.warning(
+                    "doorbell claiming session=%s after %ds; selected target %s "
+                    "never picked it up",
+                    session_id,
+                    TARGET_YIELD_SECONDS,
+                    target.id,
+                )
+
             session = ctx.registry.get(session_id)
             if session.auto_wakes >= MAX_CONSECUTIVE_AUTO_WAKES:
                 log.warning(

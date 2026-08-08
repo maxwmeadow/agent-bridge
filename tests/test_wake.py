@@ -730,3 +730,62 @@ def test_provider_is_not_inferred_from_the_agent_id(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("AGENT_BRIDGE_PROVIDER", "openai")
     assert configured_provider() == "openai"
     assert configured_provider("anthropic") == "anthropic"  # explicit flag wins
+
+
+# ------------------------------------------- several windows of the same agent
+
+
+def test_only_the_selected_window_rings(db_path: Path) -> None:
+    """Two claude windows armed; the targeted one takes the mail."""
+    store = MessageStore(db_path)
+    registry = SessionRegistry(db_path)
+    registry.register(
+        session_id="window-a", agent="claude", client_type="claude_code", project="C:/repos/a"
+    )
+    time.sleep(0.01)
+    registry.register(
+        session_id="window-b", agent="claude", client_type="claude_code", project="C:/repos/b"
+    )
+    store.send(
+        sender="codex", recipient="claude", subject="for repo a", body="b",
+        context={"working_directory": "C:/repos/a"},
+    )
+
+    # window-b is more recent, but the message names repo A, so b must yield.
+    assert run_doorbell(db_path, session_id="window-b", seconds=1.5) == 0
+    assert store.pending_wake_messages("claude")  # untouched, still for window-a
+    assert run_doorbell(db_path, session_id="window-a") == REWAKE_EXIT_CODE
+
+
+def test_a_non_target_delivers_rather_than_strand_mail(db_path: Path) -> None:
+    """If the chosen window never collects, someone must, eventually."""
+    store = MessageStore(db_path)
+    registry = SessionRegistry(db_path)
+    registry.register(
+        session_id="chosen", agent="claude", client_type="claude_code", project="C:/repos/a"
+    )
+    registry.register(
+        session_id="other", agent="claude", client_type="claude_code", project="C:/repos/b"
+    )
+    store.send(
+        sender="codex", recipient="claude", subject="for repo a", body="b",
+        context={"working_directory": "C:/repos/a"},
+    )
+
+    original = hooks.TARGET_YIELD_SECONDS
+    hooks.TARGET_YIELD_SECONDS = 0  # type: ignore[assignment]
+    try:
+        # "chosen" is not running a doorbell, so "other" takes it instead.
+        assert run_doorbell(db_path, session_id="other") == REWAKE_EXIT_CODE
+    finally:
+        hooks.TARGET_YIELD_SECONDS = original  # type: ignore[assignment]
+
+
+def test_the_other_agents_windows_are_irrelevant(db_path: Path) -> None:
+    store = MessageStore(db_path)
+    registry = SessionRegistry(db_path)
+    registry.register(session_id="codex-win", agent="codex", client_type="claude_code")
+    registry.register(session_id="claude-win", agent="claude", client_type="claude_code")
+    store.send(sender="codex", recipient="claude", subject="s", body="b")
+
+    assert run_doorbell(db_path, session_id="claude-win") == REWAKE_EXIT_CODE
