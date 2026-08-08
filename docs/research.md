@@ -251,10 +251,16 @@ is worth re-checking after a Claude Code upgrade.
 
 ### Known limits
 
-* The doorbell is armed for 570 s after each turn ends (inside Claude Code's
-  600 s default command-hook timeout). After that a truly idle session has no
-  live listener until the next turn ends. Activity re-arms it, so an ongoing
-  collaboration sustains itself; an overnight gap does not.
+* Coverage equals the Stop hook's `timeout`, because the doorbell *is* that
+  hook process and the client kills it at the deadline. Nothing else can start
+  a turn in an idle window, so there is no way to exceed it. Originally 570 s,
+  matching Claude Code's 600 s default -- that proved useless in practice, and
+  a message sent eleven minutes into a quiet window found nothing listening.
+  Now `timeout: 28800` with a 28 740 s doorbell, so a window stays reachable
+  for a working day. No maximum is documented; if the client caps it, the log
+  shows the doorbell expiring early.
+* Only the newest doorbell per session survives: older ones see a higher wake
+  generation on their next poll and retire, so processes do not accumulate.
 * **Codex has no equivalent.** No documented lifecycle hook, no `asyncRewake`.
   Codex sessions register with `wake_method="none"` and are never targeted;
   `wait_for_event` remains its mechanism, and it is honest about the

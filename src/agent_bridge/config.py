@@ -253,10 +253,26 @@ MAX_CONSECUTIVE_AUTO_WAKES = 6
 #: the gap was 113 ms.
 AUTO_WAKE_ECHO_SECONDS = 10.0
 
-#: How long the Stop-hook doorbell stays armed after a turn ends. Kept just
-#: inside Claude Code's 600s default command-hook timeout so the waiter
-#: retires on its own terms rather than being killed mid-claim.
-DOORBELL_SECONDS = 570
+#: How long the Stop-hook doorbell stays armed after a turn ends.
+#:
+#: Must stay just inside the Stop hook's configured ``timeout`` so the waiter
+#: retires on its own terms rather than being killed mid-claim. Pair this with
+#: ``"timeout": 28800`` on the Stop hook.
+#:
+#: The first version used 570s, inside Claude Code's 600s default. That proved
+#: far too short in practice: a window left alone for ten minutes went deaf,
+#: and mail sent at minute eleven sat undelivered with nothing listening. An
+#: working day covers "left it open over lunch" and "came back after a
+#: meeting", which is the point of idle wake in the first place.
+#:
+#: The cost is one mostly-sleeping process per window doing a small SQLite
+#: read twice a second. Only the newest doorbell per session survives -- older
+#: ones notice a higher wake generation on their next poll and retire -- so
+#: this does not accumulate a process per turn.
+#:
+#: There is no documented maximum for a hook timeout. If Claude Code caps it
+#: internally, the log shows the doorbell expiring earlier than requested.
+DOORBELL_SECONDS = 28_740
 
 
 def require_valid_status(status: str) -> str:

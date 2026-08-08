@@ -293,7 +293,7 @@ One mechanism covers both timings:
 | Mail arrives… | What happens |
 | --- | --- |
 | While the agent is **busy** | The doorbell finds it immediately at the turn boundary — no unsafe mid-turn injection |
-| While the agent is **idle** | The doorbell is still armed and rings up to 570 s later |
+| While the agent is **idle** | The doorbell is still armed and rings up to 8 hours later |
 | While blocked in `wait_for_event` | The in-turn wait resolves instead; the doorbell defers and no second turn is created |
 
 **The doorbell is not the message.** The injected text carries ids, counts and
@@ -315,7 +315,7 @@ Then add to `~/.claude/settings.json` (keeping any hooks you already have):
   "hooks": {
     "SessionStart":     [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 10}]}],
     "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 10}]}],
-    "Stop":             [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 600, "async": true, "asyncRewake": true}]}],
+    "Stop":             [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 28800, "async": true, "asyncRewake": true}]}],
     "StopFailure":      [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 10}]}],
     "SessionEnd":       [{"matcher": "", "hooks": [{"type": "command", "command": "…\\agent-bridge-hook.exe", "timeout": 10}]}]
   }
