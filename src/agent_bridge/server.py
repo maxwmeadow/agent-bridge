@@ -71,11 +71,32 @@ IntentArg = Annotated[
     str | None,
     Field(
         description=(
-            "Optional. What this message is for: "
-            + ", ".join(MESSAGE_INTENTS)
-            + ". Intents that continue an exchange wake the peer if it is idle; "
-            "info, decision and review_result do not. Use info to acknowledge "
-            "something without pulling the other agent back in."
+            "Optional label for what this message is, defaulting to handoff. "
+            "It is metadata for the reader and does not by itself control "
+            "whether the peer is woken -- use requires_response for that. "
+            "question: you need an answer. review_request: you want code "
+            "looked at. review_result: findings from a review you did. "
+            "handoff: work passed over with what you already did. "
+            "proposal: a suggested approach awaiting agreement. "
+            "blocker: you are stuck and cannot proceed. "
+            "objection: you disagree with something and want it reconsidered. "
+            "decision: a call that has been made. info: context with nothing "
+            "expected back."
+        )
+    ),
+]
+
+RequiresResponseArg = Annotated[
+    bool | None,
+    Field(
+        description=(
+            "Whether the peer should be woken for this message. Defaults to "
+            "true, which is almost always right: an unread message the other "
+            "agent never learns about is worse than an extra notification. "
+            "Set false only when the exchange is genuinely finished and "
+            "nothing is expected back -- a closing acknowledgement, or an FYI "
+            "you would not want to interrupt anyone for. If your message asks "
+            "anything at all, leave this true."
         )
     ),
 ]
@@ -147,11 +168,12 @@ def build_server(
         ],
         context: ContextArg = None,
         intent: IntentArg = None,
+        requires_response: RequiresResponseArg = None,
     ) -> str:
         with _tool_errors("send_message"):
             message = store.send(
                 sender=me, recipient=to, subject=subject, body=body,
-                context=context, intent=intent,
+                context=context, intent=intent, requires_response=requires_response,
             )
             hub.notify(message.recipient)
             return format_sent(message)
@@ -202,7 +224,9 @@ def build_server(
         description=(
             "Reply to a message in the same thread. The reply goes back to the other "
             "participant and keeps the conversation together. Use this rather than "
-            "send_message when responding to something you received."
+            "send_message when responding to something you received. "
+            "The peer is woken by default; pass requires_response=false only if "
+            "your reply closes the exchange and needs nothing back."
         )
     )
     async def reply(
@@ -210,10 +234,12 @@ def build_server(
         body: Annotated[str, Field(description="Your reply.")],
         context: ContextArg = None,
         intent: IntentArg = None,
+        requires_response: RequiresResponseArg = None,
     ) -> str:
         with _tool_errors("reply"):
             message = store.reply(
-                sender=me, message_id=message_id, body=body, context=context, intent=intent
+                sender=me, message_id=message_id, body=body, context=context,
+                intent=intent, requires_response=requires_response,
             )
             hub.notify(message.recipient)
             return format_sent(message)

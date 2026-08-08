@@ -254,3 +254,34 @@ def test_an_agent_can_only_set_its_own_status(db_path: Path) -> None:
         assert MessageStore(db_path).get_status("codex").status == "client_closed"
 
     anyio.run(scenario)
+
+
+def test_send_and_reply_expose_the_wake_controls(db_path: Path) -> None:
+    """An agent must be able to choose silence, not just be given it."""
+
+    async def scenario() -> None:
+        async with Client(make_server("claude", db_path)) as client:
+            schemas = {t.name: t.input_schema for t in (await client.list_tools()).tools}
+            for tool in ("send_message", "reply"):
+                props = schemas[tool].get("properties", {})
+                assert "intent" in props, tool
+                assert "requires_response" in props, tool
+                # The description has to say which way the default falls.
+                assert "efault" in props["requires_response"]["description"]
+
+            text = text_of(
+                await client.call_tool(
+                    "send_message",
+                    {
+                        "to": "codex",
+                        "subject": "done",
+                        "body": "no reply needed",
+                        "intent": "info",
+                        "requires_response": False,
+                    },
+                )
+            )
+            assert "Sent to codex" in text
+            assert MessageStore(db_path).pending_wake_messages("codex") == []
+
+    anyio.run(scenario)

@@ -153,8 +153,14 @@ def require_intent(intent: str) -> str:
 
 
 def default_requires_response(intent: str) -> bool:
-    """Whether an intent wants the peer woken, absent an explicit choice."""
-    return intent not in NON_WAKING_INTENTS
+    """Whether a message wants the peer woken, absent an explicit choice.
+
+    Always ``True``. Delivery is the safe default: an unseen message costs
+    more than a redundant wake, and the runaway risk is already covered by
+    announce-once dedupe and the consecutive-wake circuit breaker. A sender
+    that genuinely needs silence says so with ``requires_response=False``.
+    """
+    return True
 
 
 def require_failure_kind(kind: str) -> str:
@@ -231,9 +237,11 @@ MESSAGE_INTENTS: tuple[str, ...] = (
     "decision",
 )
 
-#: Intents that do not wake the peer by default. These are the ones that end
-#: an exchange rather than continue it -- the ping-pong killers.
-NON_WAKING_INTENTS: frozenset[str] = frozenset({"info", "decision", "review_result"})
+#: Intents that conventionally close an exchange. These are a *hint* for the
+#: sender, not a rule: they no longer suppress waking on their own. Silence
+#: has to be chosen deliberately with ``requires_response=False``, because a
+#: message the peer never learns about is worse than one wake too many.
+CLOSING_INTENTS: frozenset[str] = frozenset({"info", "decision", "review_result"})
 
 #: Circuit breaker. Consecutive automatic wakes allowed for one session with
 #: no human input in between. Reset by UserPromptSubmit. This is the backstop

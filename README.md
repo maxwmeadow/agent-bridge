@@ -167,10 +167,10 @@ A session looks like this:
 
 | Tool | Purpose |
 | --- | --- |
-| `send_message(to, subject, body, context?)` | Start a new thread with the other agent |
+| `send_message(to, subject, body, context?, intent?, requires_response?)` | Start a new thread with the other agent |
 | `check_inbox(unread_only=true, limit=20)` | Compact listing of messages addressed to you |
 | `read_message(message_id, mark_read=true)` | Full body plus thread info |
-| `reply(message_id, body, context?)` | Answer in the same thread, back to the sender |
+| `reply(message_id, body, context?, intent?, requires_response?)` | Answer in the same thread, back to the sender |
 | `mark_read(message_id)` | Clear something you already handled |
 | `list_threads(limit=10)` | Recent conversations, participants, unread counts |
 | `read_thread(thread_id, limit=50)` | Every message in one thread, oldest first |
@@ -352,8 +352,10 @@ agent-bridge session prune         # drop closed and long-stale sessions
 Automatic delivery makes acknowledgement ping-pong a real risk, so there are
 three independent stops:
 
-1. **Intent.** `info`, `decision` and `review_result` deliver without ringing.
-   Acknowledge with `intent=info` to end an exchange.
+1. **Explicit silence.** Every message wakes the peer unless the sender passes
+   `requires_response=false`. Intent is a label for the reader and does not
+   suppress delivery on its own — labelling a reply `info` while asking a
+   question used to notify nobody, which is worse than one wake too many.
 2. **Announce-once.** Each message rings at most one doorbell, and several
    messages coalesce into a single wake. A restart cannot re-ring for mail
    already announced.

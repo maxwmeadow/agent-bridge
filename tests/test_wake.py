@@ -11,7 +11,11 @@ from pathlib import Path
 import pytest
 
 from agent_bridge import db, hooks
-from agent_bridge.config import MAX_CONSECUTIVE_AUTO_WAKES, SESSION_STALE_SECONDS
+from agent_bridge.config import (
+    MAX_CONSECUTIVE_AUTO_WAKES,
+    MESSAGE_INTENTS,
+    SESSION_STALE_SECONDS,
+)
 from agent_bridge.errors import NotFoundError
 from agent_bridge.hooks import REWAKE_EXIT_CODE, HookContext, handle_stop
 from agent_bridge.models import utc_now
@@ -215,27 +219,45 @@ def test_message_creates_a_pending_wake(store: MessageStore) -> None:
     assert pending[0].requires_response
 
 
-@pytest.mark.parametrize("intent", ["info", "decision", "review_result"])
-def test_non_waking_intents_do_not_ring(store: MessageStore, intent: str) -> None:
-    """The ping-pong killer: an acknowledgement must not wake anyone."""
-    store.send(sender="codex", recipient="claude", subject="fyi", body="b", intent=intent)
+@pytest.mark.parametrize("intent", MESSAGE_INTENTS)
+def test_every_intent_wakes_by_default(store: MessageStore, intent: str) -> None:
+    """Delivery is the safe default, whatever the message is labelled.
+
+    An unread message the peer never learns about costs more than one extra
+    notification, and runaway loops are already bounded by announce-once
+    dedupe and the consecutive-wake circuit breaker.
+    """
+    sent = store.send(
+        sender="codex", recipient="claude", subject="s", body="b", intent=intent
+    )
+    assert sent.requires_response
+    assert [m.id for m in store.pending_wake_messages("claude")] == [sent.id]
+    store.mark_read("claude", sent.id)
+
+
+def test_silence_must_be_chosen_explicitly(store: MessageStore) -> None:
+    """requires_response=False is the only way to deliver without waking."""
+    quiet = store.send(
+        sender="codex", recipient="claude", subject="fyi", body="b",
+        intent="info", requires_response=False,
+    )
+    assert not quiet.requires_response
     assert store.pending_wake_messages("claude") == []
-    # It is still delivered and readable.
-    assert len(store.inbox("claude")) == 1
+    # Still delivered and readable -- silent, not dropped.
+    assert [m.id for m in store.inbox("claude")] == [quiet.id]
 
 
-def test_requires_response_can_be_set_explicitly(store: MessageStore) -> None:
-    store.send(
-        sender="codex", recipient="claude", subject="s", body="b",
-        intent="info", requires_response=True,
+def test_a_closing_intent_still_wakes_unless_told_otherwise(store: MessageStore) -> None:
+    """The regression this change exists to prevent.
+
+    A peer answering a question and labelling it 'info' used to silently fail
+    to notify anyone. Now the label alone cannot suppress delivery.
+    """
+    sent = store.send(
+        sender="codex", recipient="claude", subject="Re: task", body="391. And a question?",
+        intent="info",
     )
-    assert len(store.pending_wake_messages("claude")) == 1
-
-    store.send(
-        sender="codex", recipient="claude", subject="s", body="b",
-        intent="question", requires_response=False,
-    )
-    assert len(store.pending_wake_messages("claude")) == 1  # unchanged
+    assert store.pending_wake_messages("claude") == [sent]
 
 
 def test_read_messages_stop_being_pending(store: MessageStore) -> None:
