@@ -222,14 +222,20 @@ class _tool_errors:
     def __enter__(self) -> "_tool_errors":
         return self
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> bool:
+    def __exit__(
+        self,
+        exc_type: "type[BaseException] | None",
+        exc: "BaseException | None",
+        tb: object,
+    ) -> None:
+        # Returning None never suppresses: every exception either becomes a
+        # ToolError or propagates unchanged.
         if exc is None:
-            return False
+            return
         if isinstance(exc, BridgeError):
             log.warning("tool %s rejected: %s", self.tool, exc)
             raise ToolError(str(exc)) from exc
         log.exception("tool %s failed unexpectedly", self.tool)
-        return False
 
 
 def build_parser() -> argparse.ArgumentParser:

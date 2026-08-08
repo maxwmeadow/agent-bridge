@@ -34,8 +34,6 @@ PREVIEW_CHARS = 160
 
 
 def _clean_text(value: str, *, field: str, limit: int, allow_empty: bool = False) -> str:
-    if not isinstance(value, str):  # pragma: no cover - schema layers catch this first
-        raise ValidationError(f"{field} must be a string.")
     cleaned = value.strip()
     if not cleaned and not allow_empty:
         raise ValidationError(f"{field} must not be empty.")
@@ -55,11 +53,7 @@ def _clean_context(context: dict[str, str] | None) -> dict[str, str]:
         )
     cleaned: dict[str, str] = {}
     for key, value in context.items():
-        if value is None:
-            continue
-        if not isinstance(value, str):
-            raise ValidationError(f"context.{key} must be a string.")
-        text = value.strip()
+        text = value.strip() if value else ""
         if not text:
             continue
         if len(text) > MAX_CONTEXT_VALUE_CHARS:
