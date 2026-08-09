@@ -270,6 +270,11 @@ running inside Claude Code through a proxy is still a Claude Code session, and
 it gets Claude Code's wake mechanism — the bridge cares about session
 mechanics, not which vendor is behind the model.
 
+## Working with both agents
+
+See [docs/briefing.md](docs/briefing.md) for a briefing to paste into both
+sessions and a kickoff prompt for whichever one starts.
+
 ## Automatic wake-up
 
 A message sent to an **idle** Claude Code session starts a new turn there by
